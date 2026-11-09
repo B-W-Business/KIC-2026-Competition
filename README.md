@@ -26,6 +26,8 @@ uvicorn kic_watch.api:app --host 127.0.0.1 --port 8000
 
 감시 서비스는 시작 직후 전체 활성 포트폴리오를 확인하고, 기본 15분 간격으로 반복합니다. 간격은 `MONITOR_INTERVAL_SECONDS`로 설정합니다. 운영 배포에서 여러 Uvicorn worker를 사용할 경우 각 worker가 중복 스케줄을 돌리지 않도록 별도의 scheduler 프로세스 한 개만 실행하세요.
 
+백그라운드 서비스 확인은 `http://127.0.0.1:8000/health`에서 할 수 있습니다. `/`는 서비스 이름과 상태/API 문서 링크를 안내합니다.
+
 ## API 키와 사용자 설정
 
 키를 채팅에 붙여 넣지 말고 로컬 `.env` 파일에 직접 넣으세요. `.env`와 SQLite 데이터는 `.gitignore`에 포함되어 GitHub에 올라가지 않습니다.

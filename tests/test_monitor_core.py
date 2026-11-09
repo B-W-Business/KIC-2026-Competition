@@ -195,6 +195,13 @@ class WorkflowIntegrationTests(unittest.TestCase):
 
 
 class BackgroundServiceTests(unittest.TestCase):
+    def test_api_root_points_to_health_and_docs(self):
+        from kic_watch import api
+
+        payload = api.root()
+        self.assertEqual(payload["health"], "/health")
+        self.assertEqual(payload["docs"], "/docs")
+
     def test_health_endpoint_reports_scheduler_without_exposing_portfolio_data(self):
         from kic_watch import api
 

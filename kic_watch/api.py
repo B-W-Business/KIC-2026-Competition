@@ -55,6 +55,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="KIC Assumption Monitor", version="0.2.0", lifespan=lifespan)
 
 
+@app.get("/")
+def root():
+    """Point local operators to the service status and API documentation."""
+    return {"service": app.title, "health": "/health", "docs": "/docs"}
+
+
 @app.get("/health")
 def health():
     job = scheduler.get_job("portfolio-poll") if scheduler and scheduler.running else None
