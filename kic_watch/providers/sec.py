@@ -2,9 +2,12 @@
 from __future__ import annotations
 import os
 import re
+import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
 from typing import Any, List, Optional
+from urllib.parse import urljoin, urlparse
 from kic_watch.agents import CLASSIFICATION_VERSION, classify_filing
-from kic_watch.models import Assumption, COMPANIES
+from kic_watch.models import Assumption, COMPANIES, now_iso
 from kic_watch.security import safe_error
 from kic_watch.providers.http import SESSION, _get_json
 from storage import get_filing_match, save_filing_match
@@ -17,8 +20,8 @@ def _sec_headers() -> dict:
 def _sec_error(exc: Exception) -> str:
     message = safe_error(exc)
     if "403" in message:
-        return ("SEC가 요청을 403으로 거부했습니다. SEC_USER_AGENT에 실제 기관/프로젝트와 연락 가능한 이메일이 있는지, "
-                "네트워크에서 data.sec.gov 접근을 허용하는지 확인하세요. " + message)
+        return ("SEC가 요청을 403으로 거부했습니다. SEC_USER_AGENT 프로젝트명/연락처는 설정되어 있습니다. "
+                "추가 SEC 키는 필요하지 않으며, SEC의 IP/네트워크 차단 또는 일시 제한일 수 있습니다. " + message)
     return message
 
 
@@ -38,10 +41,83 @@ def _filing_rows(recent: dict) -> List[dict]:
         })
     return rows
 
-def _filing_text(ticker: str, accession: str, document: str) -> tuple[str, str]:
+def _atom_filing_rows(ticker: str) -> List[dict]:
+    """Fallback to SEC's official company EDGAR Atom feed when data.sec.gov is denied."""
+    cik = COMPANIES[ticker]["cik"]
+    response = SESSION.get(
+        "https://www.sec.gov/cgi-bin/browse-edgar",
+        params={"action": "getcompany", "CIK": cik, "type": "", "dateb": "",
+                "owner": "exclude", "count": "100", "output": "atom"},
+        timeout=25, headers=_sec_headers())
+    response.raise_for_status()
+    root = ET.fromstring(response.content)
+    rows = []
+    for entry in root.iter():
+        if entry.tag.rsplit("}", 1)[-1].lower() != "entry":
+            continue
+        fields = {}
+        alternate = ""
+        form = ""
+        for node in entry.iter():
+            name = node.tag.rsplit("}", 1)[-1].lower()
+            value = (node.text or "").strip()
+            if name in {"form", "filing-date", "accession-number", "filing-href"} and value:
+                fields[name] = value
+            if name == "category":
+                form = node.attrib.get("term", form)
+            if name == "link" and node.attrib.get("rel") in ("alternate", ""):
+                alternate = node.attrib.get("href", alternate)
+            if name == "id" and value and "accession-number=" in value and "accession-number" not in fields:
+                fields["accession-number"] = value.rsplit("accession-number=", 1)[-1]
+        form = fields.get("form", form)
+        accession = fields.get("accession-number", "")
+        if form not in ("8-K", "10-Q", "10-K") or not accession:
+            continue
+        filing_url = fields.get("filing-href") or alternate
+        filing_date = fields.get("filing-date", "")
+        if not filing_date:
+            for node in entry.iter():
+                if node.tag.rsplit("}", 1)[-1].lower() == "updated":
+                    filing_date = (node.text or "")[:10]
+                    break
+        rows.append({"form": form, "filing_date": filing_date,
+                     "accession": accession, "primary_document": "", "filing_url": filing_url})
+    if not rows:
+        raise RuntimeError("SEC EDGAR Atom 대체 피드에서 8-K/10-Q/10-K 항목을 찾지 못했습니다.")
+    return rows
+
+
+class _PrimaryDocumentLinks(HTMLParser):
+    def __init__(self, expected_prefix: str):
+        super().__init__(convert_charrefs=True)
+        self.expected_prefix = expected_prefix
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "a":
+            return
+        href = dict(attrs).get("href", "")
+        path = urlparse(href).path
+        if (path.startswith(self.expected_prefix) and re.search(r"\.html?$", path, re.I)
+                and not path.lower().endswith("-index.htm")):
+            self.links.append(href)
+
+
+def _filing_text(ticker: str, accession: str, document: str, filing_url: str = "") -> tuple[str, str]:
     cik = str(int(COMPANIES[ticker]["cik"]))
     acc = accession.replace("-", "")
-    url = "https://www.sec.gov/Archives/edgar/data/{}/{}/{}".format(cik, acc, document)
+    base_url = "https://www.sec.gov/Archives/edgar/data/{}/{}/".format(cik, acc)
+    if document:
+        url = urljoin(base_url, document)
+    else:
+        detail_url = filing_url or urljoin(base_url, accession + "-index.htm")
+        index_response = SESSION.get(detail_url, timeout=25, headers=_sec_headers())
+        index_response.raise_for_status()
+        parser = _PrimaryDocumentLinks("/Archives/edgar/data/{}/{}/".format(cik, acc))
+        parser.feed(index_response.text)
+        if not parser.links:
+            raise RuntimeError("SEC 제출 상세 페이지에서 공시 본문 링크를 찾지 못했습니다.")
+        url = urljoin("https://www.sec.gov", parser.links[0])
     response = SESSION.get(url, timeout=25, headers=_sec_headers())
     response.raise_for_status()
     # Keep API payload bounded for the relevance classifier.
@@ -83,14 +159,23 @@ def _relevance(text: str, assumption: Assumption) -> dict:
 
 def scan_company(ticker: str, assumptions: List[Assumption]) -> dict:
     company = COMPANIES[ticker]
+    feed_fallback = False
     try:
-        data = _get_json("https://data.sec.gov/submissions/CIK{}.json".format(company["cik"]), headers=_sec_headers())
-        rows = _filing_rows(data["filings"]["recent"])
+        try:
+            data = _get_json("https://data.sec.gov/submissions/CIK{}.json".format(company["cik"]), headers=_sec_headers())
+            rows = _filing_rows(data["filings"]["recent"])
+        except Exception as submissions_error:
+            try:
+                rows = _atom_filing_rows(ticker)
+            except Exception as atom_error:
+                raise RuntimeError("data.sec.gov 제출 API 실패: {} · SEC 공식 Atom 대체 피드 실패: {}".format(
+                    safe_error(submissions_error), safe_error(atom_error))) from atom_error
+            feed_fallback = True
         events, matched, warnings = [], [], []
         for row in rows[:20]:
             cik = str(int(company["cik"]))
             accession_path = row["accession"].replace("-", "")
-            row["url"] = "https://www.sec.gov/Archives/edgar/data/{}/{}/{}".format(cik, accession_path, row["primary_document"])
+            row["url"] = row.get("filing_url") or "https://www.sec.gov/Archives/edgar/data/{}/{}/{}".format(cik, accession_path, row["primary_document"])
             events.append(row)
             relevant_assumptions = [a for a in assumptions if a.ticker == ticker and getattr(a, "enabled", True)]
             if not relevant_assumptions:
@@ -109,7 +194,7 @@ def scan_company(ticker: str, assumptions: List[Assumption]) -> dict:
             filing_url = row["url"]
             if pending:
                 try:
-                    text, filing_url = _filing_text(ticker, row["accession"], row["primary_document"])
+                    text, filing_url = _filing_text(ticker, row["accession"], row["primary_document"], row.get("filing_url", ""))
                 except Exception as exc:
                     warnings.append("{} 공시 본문 조회 실패: {}".format(row["accession"], _sec_error(exc)))
                     continue
@@ -119,9 +204,12 @@ def scan_company(ticker: str, assumptions: List[Assumption]) -> dict:
                     if relevance["related"]:
                         matched.append({**row, **relevance, "url": filing_url, "assumption_id": a.id,
                                         "assumption_title": a.title})
-        return {"events": events, "matched": matched, "warnings": warnings, "checked_at": now_iso()}
+        result = {"events": events, "matched": matched, "warnings": warnings, "checked_at": now_iso()}
+        if feed_fallback:
+            result["source_warning"] = "data.sec.gov 제출 API가 거부되어 SEC 공식 EDGAR Atom 피드로 공시 목록을 조회했습니다."
+        return result
     except Exception as exc:
-        return {"events": [], "matched": [], "error": "SEC 공시 조회에 실패했습니다: {}".format(_sec_error(exc))}
+        return {"events": [], "matched": [], "error": "SEC 기본 API와 공식 EDGAR Atom 대체 조회가 모두 실패했습니다. SEC_USER_AGENT 설정은 확인되었으며, SEC/네트워크의 접근 거부일 수 있습니다. {}".format(_sec_error(exc))}
 
 def _sec_company_fact(ticker: str, metric: str) -> dict:
     cik = COMPANIES[ticker]["cik"]

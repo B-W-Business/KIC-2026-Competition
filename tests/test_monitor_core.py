@@ -223,7 +223,33 @@ class ProviderMappingTests(unittest.TestCase):
     def test_sec_403_error_explains_user_agent_or_network_cause(self):
         message = sec_provider._sec_error(RuntimeError("HTTP 403 Forbidden"))
         self.assertIn("SEC_USER_AGENT", message)
-        self.assertIn("data.sec.gov", message)
+        self.assertIn("403", message)
+
+    def test_sec_atom_fallback_parses_official_company_feed(self):
+        xml = b'''<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+          <entry><id>urn:tag:sec.gov,2008:accession-number=0000937966-26-000001</id>
+            <category term="10-Q"/><content><form>10-Q</form><filing-date>2026-11-09</filing-date>
+              <accession-number>0000937966-26-000001</accession-number>
+              <filing-href>https://www.sec.gov/Archives/edgar/data/937966/000093796626000001/0000937966-26-000001-index.htm</filing-href>
+            </content></entry></feed>'''
+        original = sec_provider.SESSION.get
+        sec_provider.SESSION.get = lambda *args, **kwargs: types.SimpleNamespace(content=xml, raise_for_status=lambda: None)
+        try:
+            rows = sec_provider._atom_filing_rows("ASML")
+        finally:
+            sec_provider.SESSION.get = original
+        self.assertEqual(rows[0]["form"], "10-Q")
+        self.assertEqual(rows[0]["accession"], "0000937966-26-000001")
+        self.assertIn("-index.htm", rows[0]["filing_url"])
+
+    def test_sec_scan_uses_atom_when_submissions_api_is_forbidden(self):
+        rows = [{"form": "10-Q", "filing_date": "2026-11-09", "accession": "0000937966-26-000001",
+                 "primary_document": "", "filing_url": "https://www.sec.gov/Archives/edgar/data/937966/example-index.htm"}]
+        with patch.object(sec_provider, "_get_json", side_effect=RuntimeError("HTTP 403 Forbidden")), \
+                patch.object(sec_provider, "_atom_filing_rows", return_value=rows):
+            result = sec_provider.scan_company("ASML", [])
+        self.assertEqual(len(result["events"]), 1)
+        self.assertIn("Atom", result["source_warning"])
 
     def test_sec_provider_sends_configured_user_agent(self):
         captured = {}

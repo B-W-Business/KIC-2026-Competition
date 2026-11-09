@@ -72,10 +72,10 @@ with st.sidebar:
         except ImportError:
             st.warning("자동 새로고침 기능을 사용하려면 streamlit-autorefresh를 설치하세요. '공시 확인' 버튼은 계속 사용할 수 있습니다.")
     st.divider()
-    st.caption("SEC는 연락처가 포함된 User-Agent를 요구합니다.")
+    st.caption("SEC 공시 API는 별도 API 키 없이 프로젝트명과 연락처가 포함된 User-Agent를 사용합니다.")
     user_agent = os.getenv("SEC_USER_AGENT", "").lower()
     if not user_agent or "your-contact" in user_agent or "example.org" in user_agent or "example.com" in user_agent:
-        st.warning("SEC_USER_AGENT를 실제 기관명과 연락 가능한 이메일로 설정하세요.")
+        st.warning("SEC_USER_AGENT에 프로젝트명과 연락 가능한 이메일을 설정하세요.")
     if st.button("백그라운드 감시 상태 확인"):
         try:
             service = background_service_status(os.getenv("MONITOR_API_URL", "http://127.0.0.1:8000"))
@@ -111,6 +111,8 @@ with tab_monitor:
             st.error(result["error"])
         else:
             st.success(f"최근 공시 {len(result['events'])}건 확인 · 가정 연관 이벤트 {len(result['matched'])}건")
+            if result.get("source_warning"):
+                st.warning(result["source_warning"])
             for warning in result.get("warnings", []):
                 st.warning("일부 공시 본문을 처리하지 못했습니다: " + warning)
             for event in result["matched"]:
