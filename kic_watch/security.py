@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-SENSITIVE_QUERY_KEYS = {"api_key", "apikey", "subscription-key", "subscription_key", "key", "token", "access_token"}
+SENSITIVE_QUERY_KEYS = {"api_key", "apikey", "crtfc_key", "subscription-key", "subscription_key", "key", "token", "access_token"}
 
 
 def redact_url(url: str) -> str:

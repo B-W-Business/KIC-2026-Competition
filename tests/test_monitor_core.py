@@ -15,7 +15,7 @@ from kic_watch.workflow import _comparison_node
 from kic_watch.workflow import run_review
 from kic_watch.models import Assumption
 from kic_watch.providers.sec import _latest_matching_facts
-from kic_watch.providers import comtrade as comtrade_provider, fred as fred_provider, sam as sam_provider, sec as sec_provider
+from kic_watch.providers import comtrade as comtrade_provider, fred as fred_provider, sam as sam_provider, sec as sec_provider, opendart as dart_provider
 import storage
 
 
@@ -120,6 +120,7 @@ class CredentialRedactionTests(unittest.TestCase):
         self.assertIn("[REDACTED]", value)
         self.assertIn("series_id=ABC", value)
         self.assertNotIn("sk_fake_openai_secret_123456789012345", safe_error("Bearer sk_fake_openai_secret_123456789012345"))
+        self.assertNotIn("secret-dart-key", safe_error("https://opendart.fss.or.kr/api/list.json?crtfc_key=secret-dart-key&corp_code=00126380"))
 
 
 class ComparisonTests(unittest.TestCase):
@@ -221,6 +222,35 @@ class BackgroundServiceTests(unittest.TestCase):
 
 
 class ProviderMappingTests(unittest.TestCase):
+    def test_opendart_annual_revenue_growth_and_gross_margin(self):
+        rows_2024 = (
+            {"account_id": "ifrs-full_Revenue", "account_nm": "매출액", "sj_div": "IS", "thstrm_amount": "100000000"},
+            {"account_id": "ifrs-full_GrossProfit", "account_nm": "매출총이익", "sj_div": "IS", "thstrm_amount": "30000000"},
+        )
+        rows_2025 = (
+            {"account_id": "ifrs-full_Revenue", "account_nm": "매출액", "sj_div": "IS", "thstrm_amount": "120000000"},
+            {"account_id": "ifrs-full_GrossProfit", "account_nm": "매출총이익", "sj_div": "IS", "thstrm_amount": "36000000"},
+            {"rcept_no": "20260301000001"},
+        )
+        with patch.object(dart_provider, "_year_rows", return_value=[(2025, rows_2025), (2024, rows_2024)]):
+            growth = dart_provider.company_fact("005930", "revenue_growth")
+            margin = dart_provider.company_fact("005930", "gross_margin")
+        self.assertAlmostEqual(growth["value"], 20.0)
+        self.assertEqual(growth["period_key"], "FY2025")
+        self.assertEqual(margin["value"], 30.0)
+        self.assertIn("rcpNo=20260301000001", margin["url"])
+
+    def test_opendart_scan_matches_regular_filings_for_enabled_assumptions(self):
+        assumption = Assumption.create(ticker="005930", title="매출 성장", memo="", metric="revenue_growth",
+                                       source="OpenDART", baseline=5, target=10, tolerance=3, query="")
+        with patch.dict(os.environ, {"OPENDART_API_KEY": "test-key"}), \
+                patch.object(dart_provider, "_get_json", return_value={"status": "000", "list": [
+                    {"rcept_no": "20260301000001", "rcept_dt": "20260301", "report_nm": "사업보고서 (2025.12)"}]}):
+            result = dart_provider.scan_company("005930", [assumption])
+        self.assertEqual(len(result["events"]), 1)
+        self.assertEqual(len(result["matched"]), 1)
+        self.assertIn("dart.fss.or.kr", result["events"][0]["url"])
+
     def test_http_forbidden_response_is_not_retried(self):
         calls = []
         response = types.SimpleNamespace(status_code=403, url="https://data.sec.gov/", headers={})

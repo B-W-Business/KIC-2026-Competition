@@ -35,13 +35,14 @@ uvicorn kic_watch.api:app --host 127.0.0.1 --port 8000
 | 기능 | 직접 준비할 값 | 발급/설정 방법 |
 |---|---|---|
 | SEC EDGAR 공시·Company Facts | API 키 불필요. `SEC_USER_AGENT`에 기관/프로젝트 이름과 연락 가능한 이메일 | 예: `SEC_USER_AGENT=KIC Research analyst@example.org`. 유효한 연락처를 넣어야 SEC 데이터 요청을 보낼 수 있습니다. |
+| OpenDART 공시·정기 재무제표 | 무료 인증키를 `OPENDART_API_KEY`로 저장 | [OpenDART](https://opendart.fss.or.kr/)에서 키를 발급받으세요. MVP는 삼성전자·SK하이닉스의 정기공시 목록 및 연간 연결 재무지표 조회를 지원합니다. |
 | FRED 거시 지표 | `FRED_API_KEY` | [FRED API 키 발급 안내](https://fred.stlouisfed.org/docs/api/api_key.html)에서 발급 후 `.env`에 저장 |
 | UN Comtrade 무역 통계 | 기본 공개 API는 키 없이 사용 가능. 계정 키는 `COMTRADE_API_KEY`, 선택 보조 키는 `COMTRADE_SECONDARY_API_KEY` | [UN Comtrade API 포털](https://comtradeplus.un.org/)에서 계정/키를 만들고 `.env`에 저장. 기본 구현은 미국 수입(`flowCode=M`), HS 코드, 세계 전체 상대국을 조회하며, 기본 키 실패 시 보조 키로 재시도합니다. |
 | OpenAI 구조화 주장 분류·Red-Team·코드 생성 | `OPENAI_API_KEY` | [OpenAI API 키 페이지](https://platform.openai.com/api-keys)에서 만들고 `.env`에 저장. API 사용 요금은 계정에 청구될 수 있습니다. |
 | E2B 격리 Python 샌드박스 | `E2B_API_KEY` | [E2B 계정/API 키](https://e2b.dev/docs)에서 발급 후 `.env`에 저장. 샌드박스 사용량에 따라 비용이 발생할 수 있습니다. |
 | SAM.gov 조달 기회 검색 | `SAM_API_KEY` | [SAM.gov 공개 API 안내](https://open.gsa.gov/api/)에서 키를 발급받아 `.env`에 저장 |
 
-처음 실행은 SEC 연락처만으로 가능합니다. OpenAI/E2B 키가 없으면 공시 키워드 분류, 규칙 기반 반론, 로컬 결정론 계산으로 계속 동작합니다. 감시 대상이 실제 포트폴리오와 다르면 샘플 가정을 편집하고 잘못된 기업은 감시를 끄세요.
+처음 실행은 SEC 연락처만으로 가능합니다. OpenDART 대상 한국 기업(삼성전자·SK하이닉스)을 조회하려면 별도 `OPENDART_API_KEY`가 필요합니다. OpenAI/E2B 키가 없으면 공시 키워드 분류, 규칙 기반 반론, 로컬 결정론 계산으로 계속 동작합니다. 감시 대상이 실제 포트폴리오와 다르면 샘플 가정을 편집하고 잘못된 기업은 감시를 끄세요.
 
 OpenAI를 활성화하면 투자 메모, SEC 공시 발췌문 및 관측 자료 일부가 분류와 Red-Team 분석을 위해 OpenAI API로 전송됩니다. E2B를 활성화하면 입력값인 기준값·목표값·허용 괴리와 관측 수치/시계열이 계산을 위해 E2B 샌드박스로 전송됩니다. 조직의 데이터 반출 정책을 확인한 뒤 키를 설정하세요. 비밀 API 키와 전체 투자 메모는 E2B에 보내지 않으며, API 키는 LLM 프롬프트에도 포함되지 않습니다.
 

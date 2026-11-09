@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable, List
 
-from kic_agent import COMPANIES, Assumption, run_review, scan_company
+from kic_agent import COMPANIES, Assumption, run_review
+from kic_watch.providers import scan_issuer
 from kic_watch.security import safe_error
 from storage import claim_event, fail_event, finish_event, load_state, save_report
 
@@ -13,7 +14,10 @@ def monitor_ticker(ticker: str, assumptions: List[Assumption] = None) -> dict:
         stored, _ = load_state()
         assumptions = [Assumption(**row) for row in stored]
     active = [a for a in assumptions if a.ticker == ticker and a.enabled]
-    scan = scan_company(ticker, active)
+    try:
+        scan = scan_issuer(ticker, active)
+    except Exception as exc:
+        return {"events": [], "matched": [], "error": safe_error(exc), "reports": [], "processing_errors": []}
     reports = []
     errors = []
     if scan.get("error"):

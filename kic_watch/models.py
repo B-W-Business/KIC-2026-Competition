@@ -7,6 +7,9 @@ from typing import Any, Dict, List, TypedDict
 
 
 COMPANIES = {
+    # OpenDART corp_code values; these are Korean issuer records, not KIC holdings.
+    "005930": {"name": "Samsung Electronics Co., Ltd.", "market": "KR", "corp_code": "00126380", "stock_code": "005930"},
+    "000660": {"name": "SK hynix Inc.", "market": "KR", "corp_code": "00164779", "stock_code": "000660"},
     "NVDA": {"name": "NVIDIA Corporation", "cik": "0001045810"},
     "AMD": {"name": "Advanced Micro Devices, Inc.", "cik": "0000002488"},
     "AVGO": {"name": "Broadcom Inc.", "cik": "0001730168"},
