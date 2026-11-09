@@ -10,6 +10,18 @@ from kic_watch.providers.http import SESSION, _get_json
 from storage import get_filing_match, save_filing_match
 
 
+def _sec_headers() -> dict:
+    return {"User-Agent": os.getenv("SEC_USER_AGENT", "").strip()}
+
+
+def _sec_error(exc: Exception) -> str:
+    message = safe_error(exc)
+    if "403" in message:
+        return ("SEC가 요청을 403으로 거부했습니다. SEC_USER_AGENT에 실제 기관/프로젝트와 연락 가능한 이메일이 있는지, "
+                "네트워크에서 data.sec.gov 접근을 허용하는지 확인하세요. " + message)
+    return message
+
+
 def _filing_rows(recent: dict) -> List[dict]:
     rows = []
     forms = recent.get("form", [])
@@ -30,7 +42,7 @@ def _filing_text(ticker: str, accession: str, document: str) -> tuple[str, str]:
     cik = str(int(COMPANIES[ticker]["cik"]))
     acc = accession.replace("-", "")
     url = "https://www.sec.gov/Archives/edgar/data/{}/{}/{}".format(cik, acc, document)
-    response = SESSION.get(url, timeout=25)
+    response = SESSION.get(url, timeout=25, headers=_sec_headers())
     response.raise_for_status()
     # Keep API payload bounded for the relevance classifier.
     clean = re.sub(r"<[^>]+>", " ", response.text)
@@ -72,7 +84,7 @@ def _relevance(text: str, assumption: Assumption) -> dict:
 def scan_company(ticker: str, assumptions: List[Assumption]) -> dict:
     company = COMPANIES[ticker]
     try:
-        data = _get_json("https://data.sec.gov/submissions/CIK{}.json".format(company["cik"]))
+        data = _get_json("https://data.sec.gov/submissions/CIK{}.json".format(company["cik"]), headers=_sec_headers())
         rows = _filing_rows(data["filings"]["recent"])
         events, matched, warnings = [], [], []
         for row in rows[:20]:
@@ -99,7 +111,7 @@ def scan_company(ticker: str, assumptions: List[Assumption]) -> dict:
                 try:
                     text, filing_url = _filing_text(ticker, row["accession"], row["primary_document"])
                 except Exception as exc:
-                    warnings.append("{} 공시 본문 조회 실패: {}".format(row["accession"], safe_error(exc)))
+                    warnings.append("{} 공시 본문 조회 실패: {}".format(row["accession"], _sec_error(exc)))
                     continue
                 for a in pending:
                     relevance = _relevance(text, a)
@@ -109,11 +121,14 @@ def scan_company(ticker: str, assumptions: List[Assumption]) -> dict:
                                         "assumption_title": a.title})
         return {"events": events, "matched": matched, "warnings": warnings, "checked_at": now_iso()}
     except Exception as exc:
-        return {"events": [], "matched": [], "error": "SEC 공시 조회에 실패했습니다: {}".format(safe_error(exc))}
+        return {"events": [], "matched": [], "error": "SEC 공시 조회에 실패했습니다: {}".format(_sec_error(exc))}
 
 def _sec_company_fact(ticker: str, metric: str) -> dict:
     cik = COMPANIES[ticker]["cik"]
-    facts = _get_json("https://data.sec.gov/api/xbrl/companyfacts/CIK{}.json".format(cik))
+    try:
+        facts = _get_json("https://data.sec.gov/api/xbrl/companyfacts/CIK{}.json".format(cik), headers=_sec_headers())
+    except Exception as exc:
+        raise RuntimeError(_sec_error(exc)) from exc
     usgaap = facts.get("facts", {}).get("us-gaap", {})
     candidates = {
         "revenue_growth": ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet", "SalesRevenueGoodsNet"],

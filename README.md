@@ -34,7 +34,7 @@ uvicorn kic_watch.api:app --host 127.0.0.1 --port 8000
 |---|---|---|
 | SEC EDGAR 공시·Company Facts | API 키 불필요. `SEC_USER_AGENT`에 기관/프로젝트 이름과 연락 가능한 이메일 | 예: `SEC_USER_AGENT=KIC Research analyst@example.org`. 유효한 연락처를 넣어야 SEC 데이터 요청을 보낼 수 있습니다. |
 | FRED 거시 지표 | `FRED_API_KEY` | [FRED API 키 발급 안내](https://fred.stlouisfed.org/docs/api/api_key.html)에서 발급 후 `.env`에 저장 |
-| UN Comtrade 무역 통계 | 기본 공개 API는 키 없이 사용 가능. 제한 상향 시 `COMTRADE_API_KEY` | [UN Comtrade API 포털](https://comtradeplus.un.org/)에서 계정/키를 만들고 `.env`에 저장. 기본 구현은 미국 수입(`flowCode=M`), HS 코드, 세계 전체 상대국을 조회합니다. |
+| UN Comtrade 무역 통계 | 기본 공개 API는 키 없이 사용 가능. 계정 키는 `COMTRADE_API_KEY`, 선택 보조 키는 `COMTRADE_SECONDARY_API_KEY` | [UN Comtrade API 포털](https://comtradeplus.un.org/)에서 계정/키를 만들고 `.env`에 저장. 기본 구현은 미국 수입(`flowCode=M`), HS 코드, 세계 전체 상대국을 조회하며, 기본 키 실패 시 보조 키로 재시도합니다. |
 | OpenAI 구조화 주장 분류·Red-Team·코드 생성 | `OPENAI_API_KEY` | [OpenAI API 키 페이지](https://platform.openai.com/api-keys)에서 만들고 `.env`에 저장. API 사용 요금은 계정에 청구될 수 있습니다. |
 | E2B 격리 Python 샌드박스 | `E2B_API_KEY` | [E2B 계정/API 키](https://e2b.dev/docs)에서 발급 후 `.env`에 저장. 샌드박스 사용량에 따라 비용이 발생할 수 있습니다. |
 | SAM.gov 조달 기회 검색 | `SAM_API_KEY` | [SAM.gov 공개 API 안내](https://open.gsa.gov/api/)에서 키를 발급받아 `.env`에 저장 |
@@ -49,7 +49,7 @@ OpenAI를 활성화하면 투자 메모, SEC 공시 발췌문 및 관측 자료 
 2. **SEC 이벤트:** 20개 반도체/빅테크 기업의 8-K/10-Q/10-K 최신 제출 목록을 검색하고 원문을 가져옵니다. 제목/메모와의 구조화 관련성 분류 결과를 영속 캐시해 다음 스캔에서 재분류를 피합니다.
 3. **명시 주장 추출:** OpenAI가 근거 문장, 숫자, 지표, 단위와 기간을 JSON Schema로 추출합니다. 숫자나 비교 지표가 분명하지 않으면 비워 둡니다. 같은 지표·단위·기간일 때만 공시 숫자와 관측치를 직접 비교합니다.
 4. **공공 데이터 수집:** SEC Company Facts, FRED, UN Comtrade, SAM.gov 어댑터가 원자료·시점·출처를 수집합니다. 실패·rate limit은 지수 백오프로 재시도하며 키 값은 오류/리포트에 마스킹합니다.
-5. **격리 계산과 자가 수정:** OpenAI가 짧은 분석 코드를 생성하고 AST 정책 검증을 거친 뒤 E2B에 공개 관측치만 넣어 실행합니다. 오류가 나면 최대 2회 재작성·재검증합니다. API 키/환경 변수/파일 접근/네트워크 호출/루프/함수 정의는 코드 정책에서 막습니다. 코드 결과는 로컬 결정론 계산으로 대조하며 불일치 시 로컬 기준식을 판정에 사용합니다.
+5. **격리 계산과 자가 수정:** OpenAI가 짧은 분석 코드를 생성하고 AST 정책 검증을 거친 뒤 E2B에 숫자 기준값·목표값·허용 괴리와 관측 자료를 넣어 실행합니다. 오류가 나면 최대 2회 재작성·재검증합니다. API 키/환경 변수/파일 접근/네트워크 호출/루프/함수 정의는 코드 정책에서 막습니다. 코드 결과는 로컬 결정론 계산으로 대조하며 불일치 시 로컬 기준식을 판정에 사용합니다.
 6. **Red-Team:** 별도 프롬프트가 대안 설명, 반론, 열린 질문과 신뢰 수준을 구조화합니다. LLM이 없으면 규칙 기반 반론을 사용합니다. 최종 경고는 계산된 괴리와 명시적 주장을 중심으로 만듭니다.
 7. **중복 없는 백그라운드:** FastAPI + APScheduler가 UI가 닫힌 동안에도 감시합니다. 공시/가정 조합에 고유 키를 두고 SQLite transaction으로 한 번만 처리하며, 실패는 최대 3회 재시도합니다. 수동 조회와 백그라운드 조회는 같은 서비스를 공유합니다.
 

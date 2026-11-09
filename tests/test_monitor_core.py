@@ -14,7 +14,7 @@ from kic_watch.workflow import _comparison_node
 from kic_watch.workflow import run_review
 from kic_watch.models import Assumption
 from kic_watch.providers.sec import _latest_matching_facts
-from kic_watch.providers import comtrade as comtrade_provider, sam as sam_provider
+from kic_watch.providers import comtrade as comtrade_provider, fred as fred_provider, sam as sam_provider, sec as sec_provider
 import storage
 
 
@@ -213,6 +213,52 @@ class BackgroundServiceTests(unittest.TestCase):
 
 
 class ProviderMappingTests(unittest.TestCase):
+    def test_sec_403_error_explains_user_agent_or_network_cause(self):
+        message = sec_provider._sec_error(RuntimeError("HTTP 403 Forbidden"))
+        self.assertIn("SEC_USER_AGENT", message)
+        self.assertIn("data.sec.gov", message)
+
+    def test_sec_provider_sends_configured_user_agent(self):
+        captured = {}
+        original = sec_provider._get_json
+
+        def fake_get_json(url, params=None, timeout=25, headers=None):
+            captured.update(url=url, headers=headers)
+            return {"facts": {"us-gaap": {}}}
+
+        sec_provider._get_json = fake_get_json
+        old_user_agent = os.environ.get("SEC_USER_AGENT")
+        os.environ["SEC_USER_AGENT"] = "KIC Research analyst@institution.org"
+        try:
+            with self.assertRaises(RuntimeError):
+                sec_provider._sec_company_fact("NVDA", "revenue_growth")
+        finally:
+            sec_provider._get_json = original
+            if old_user_agent is None:
+                os.environ.pop("SEC_USER_AGENT", None)
+            else:
+                os.environ["SEC_USER_AGENT"] = old_user_agent
+        self.assertEqual(captured["headers"]["User-Agent"], "KIC Research analyst@institution.org")
+
+    def test_fred_selects_latest_observation_after_fetching_recent_window(self):
+        captured = {}
+        original = fred_provider._get_json
+        fred_provider._get_json = lambda url, params: (captured.update(url=url, params=params) or {"observations": [
+            {"date": "2026-11-10", "value": "4.1"}, {"date": "2026-11-09", "value": "4.2"}]})
+        old_key = os.environ.get("FRED_API_KEY")
+        os.environ["FRED_API_KEY"] = "fake-fred-key"
+        try:
+            result = fred_provider._fred("DGS10")
+        finally:
+            fred_provider._get_json = original
+            if old_key is None:
+                os.environ.pop("FRED_API_KEY", None)
+            else:
+                os.environ["FRED_API_KEY"] = old_key
+        self.assertEqual(captured["params"]["sort_order"], "desc")
+        self.assertEqual(result["date"], "2026-11-10")
+        self.assertEqual(result["value"], 4.1)
+
     def test_sam_uses_supported_title_filter_and_one_year_window(self):
         captured = {}
         original = sam_provider._get_json
@@ -236,15 +282,73 @@ class ProviderMappingTests(unittest.TestCase):
         self.assertEqual(result["value"], 3)
 
     def test_comtrade_uses_api_import_flow_code(self):
-        captured = {}
+        captured = []
         original = comtrade_provider._get_json
-        comtrade_provider._get_json = lambda url, params: (captured.update(url=url, params=params) or {"data": [
-            {"period": "2024", "primaryValue": 100}, {"period": "2025", "primaryValue": 110}]})
+        original_sleep = comtrade_provider.time.sleep
+
+        def fake_get_json(url, params):
+            captured.append((url, dict(params)))
+            value = 100 if len(captured) == 1 else 110
+            return {"data": [{"period": params["period"], "primaryValue": value}]}
+
+        comtrade_provider._get_json = fake_get_json
+        comtrade_provider.time.sleep = lambda _seconds: None
+        old_primary = os.environ.get("COMTRADE_API_KEY")
+        old_secondary = os.environ.get("COMTRADE_SECONDARY_API_KEY")
+        os.environ["COMTRADE_API_KEY"] = "fake-primary-key"
+        os.environ["COMTRADE_SECONDARY_API_KEY"] = "fake-secondary-key"
         try:
             result = comtrade_provider._comtrade("8542")
         finally:
             comtrade_provider._get_json = original
-        self.assertEqual(captured["params"]["flowCode"], "M")
+            comtrade_provider.time.sleep = original_sleep
+            if old_primary is None:
+                os.environ.pop("COMTRADE_API_KEY", None)
+            else:
+                os.environ["COMTRADE_API_KEY"] = old_primary
+            if old_secondary is None:
+                os.environ.pop("COMTRADE_SECONDARY_API_KEY", None)
+            else:
+                os.environ["COMTRADE_SECONDARY_API_KEY"] = old_secondary
+        self.assertEqual(len(captured), 2)
+        periods = [int(params["period"]) for _, params in captured]
+        self.assertEqual(periods[1] - periods[0], 1)
+        self.assertTrue(all(params["flowCode"] == "M" for _, params in captured))
+        self.assertTrue(all(params["subscription-key"] == "fake-primary-key" for _, params in captured))
+        self.assertAlmostEqual(result["value"], 10)
+
+    def test_comtrade_retries_with_secondary_key(self):
+        captured = []
+        original = comtrade_provider._get_json
+        original_sleep = comtrade_provider.time.sleep
+
+        def fake_get_json(url, params):
+            captured.append((params["subscription-key"], params["period"]))
+            if len(captured) == 1:
+                raise RuntimeError("primary rejected")
+            value = 100 if params["period"] == captured[1][1] else 110
+            return {"data": [{"period": params["period"], "primaryValue": value}]}
+
+        comtrade_provider._get_json = fake_get_json
+        comtrade_provider.time.sleep = lambda _seconds: None
+        old_primary = os.environ.get("COMTRADE_API_KEY")
+        old_secondary = os.environ.get("COMTRADE_SECONDARY_API_KEY")
+        os.environ["COMTRADE_API_KEY"] = "fake-primary-key"
+        os.environ["COMTRADE_SECONDARY_API_KEY"] = "fake-secondary-key"
+        try:
+            result = comtrade_provider._comtrade("8542")
+        finally:
+            comtrade_provider._get_json = original
+            comtrade_provider.time.sleep = original_sleep
+            if old_primary is None:
+                os.environ.pop("COMTRADE_API_KEY", None)
+            else:
+                os.environ["COMTRADE_API_KEY"] = old_primary
+            if old_secondary is None:
+                os.environ.pop("COMTRADE_SECONDARY_API_KEY", None)
+            else:
+                os.environ["COMTRADE_SECONDARY_API_KEY"] = old_secondary
+        self.assertEqual([key for key, _ in captured], ["fake-primary-key", "fake-secondary-key", "fake-primary-key"])
         self.assertAlmostEqual(result["value"], 10)
 
 

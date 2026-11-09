@@ -56,6 +56,7 @@ if "events" not in st.session_state:
     st.session_state.events = []
 
 st.markdown("<div class='hero'><h1>KIC 해외 포트폴리오 투자 가정 감시</h1><p>공시 주장과 공공 데이터의 간극을 추적하고, 독립적 반론을 기록합니다.</p></div>", unsafe_allow_html=True)
+st.markdown("**FRED 안내:** 본 서비스는 FRED API를 사용하지만 Federal Reserve Bank of St. Louis의 보증 또는 인증을 받지 않았습니다. [FRED API 이용 약관](https://fred.stlouisfed.org/docs/api/terms_of_use.html)")
 
 with st.sidebar:
     st.header("감시 설정")

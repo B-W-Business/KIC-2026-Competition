@@ -10,14 +10,15 @@ from kic_watch.security import safe_error
 load_dotenv()
 
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": os.getenv("SEC_USER_AGENT", "KIC Research contact@example.org"), "Accept-Encoding": "gzip, deflate"})
+SESSION.headers.update({"User-Agent": "KIC-Investment-Assumption-Watch/1.0", "Accept-Encoding": "gzip, deflate"})
 
-def _get_json(url: str, params: Optional[dict] = None, timeout: int = 25) -> Any:
+def _get_json(url: str, params: Optional[dict] = None, timeout: int = 25,
+              headers: Optional[dict] = None) -> Any:
     """GET with bounded exponential backoff for transient and rate-limit errors."""
     last_error = None
     for attempt in range(4):
         try:
-            response = SESSION.get(url, params=params, timeout=timeout)
+            response = SESSION.get(url, params=params, timeout=timeout, headers=headers)
             if response.status_code in (429, 500, 502, 503, 504):
                 last_error = "HTTP {} from {}".format(response.status_code, response.url)
                 try:

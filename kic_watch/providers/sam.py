@@ -11,7 +11,8 @@ def _sam(query: str) -> dict:
     if not api_key:
         raise RuntimeError("SAM_API_KEY가 필요합니다. SAM.gov 공개 API 키를 설정하세요.")
     posted_to = datetime.now().date()
-    posted_from = posted_to - timedelta(days=365)
+    # SAM validates calendar-year ranges; stay safely inside the one-year cap.
+    posted_from = posted_to - timedelta(days=360)
     params = {"api_key": api_key, "limit": 100,
               "postedFrom": posted_from.strftime("%m/%d/%Y"),
               "postedTo": posted_to.strftime("%m/%d/%Y")}
