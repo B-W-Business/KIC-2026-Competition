@@ -295,7 +295,7 @@ def _comtrade(query: str) -> dict:
     hs = query or "8542"
     year = datetime.now(timezone.utc).year - 1
     params = {"reporterCode": "842", "cmdCode": hs, "period": "{},{}".format(year - 2, year - 1),
-              "flowCode": "Import", "partnerCode": "0", "motCode": "0", "aggregateBy": "6", "breakdownMode": "classic", "partner2Code": "0"}
+              "flowCode": "M", "partnerCode": "0", "motCode": "0", "aggregateBy": "6", "breakdownMode": "classic", "partner2Code": "0"}
     if os.getenv("COMTRADE_API_KEY"):
         params["subscription-key"] = os.environ["COMTRADE_API_KEY"]
     payload = _get_json("https://comtradeapi.un.org/public/v1/preview/C/A/HS", params)
