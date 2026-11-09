@@ -29,6 +29,10 @@ def _get_json(url: str, params: Optional[dict] = None, timeout: int = 25,
                 continue
             response.raise_for_status()
             return response.json()
+        except requests.HTTPError as exc:
+            # A 403/404 is a definitive access/resource response, not a transient outage.
+            # Repeating denied SEC requests can worsen fair-access restrictions.
+            raise RuntimeError("API 요청 실패: {} ({})".format(url, safe_error(exc))) from exc
         except (requests.RequestException, ValueError) as exc:
             last_error = safe_error(exc)
             if attempt < 3:

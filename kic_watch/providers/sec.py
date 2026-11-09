@@ -14,7 +14,9 @@ from storage import get_filing_match, save_filing_match
 
 
 def _sec_headers() -> dict:
-    return {"User-Agent": os.getenv("SEC_USER_AGENT", "").strip()}
+    return {"User-Agent": os.getenv("SEC_USER_AGENT", "").strip(),
+            "Accept-Encoding": "gzip, deflate",
+            "Accept": "application/json, application/atom+xml, application/xml, text/xml, text/html, */*"}
 
 
 def _sec_error(exc: Exception) -> str:
@@ -46,8 +48,8 @@ def _atom_filing_rows(ticker: str) -> List[dict]:
     cik = COMPANIES[ticker]["cik"]
     response = SESSION.get(
         "https://www.sec.gov/cgi-bin/browse-edgar",
-        params={"action": "getcompany", "CIK": cik, "type": "", "dateb": "",
-                "owner": "exclude", "count": "100", "output": "atom"},
+        params={"action": "getcompany", "CIK": cik, "owner": "exclude",
+                "count": "100", "output": "atom"},
         timeout=25, headers=_sec_headers())
     response.raise_for_status()
     root = ET.fromstring(response.content)

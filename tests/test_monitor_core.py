@@ -4,6 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
+import requests
 from unittest.mock import patch
 from pathlib import Path
 
@@ -220,6 +221,27 @@ class BackgroundServiceTests(unittest.TestCase):
 
 
 class ProviderMappingTests(unittest.TestCase):
+    def test_http_forbidden_response_is_not_retried(self):
+        calls = []
+        response = types.SimpleNamespace(status_code=403, url="https://data.sec.gov/", headers={})
+        def forbidden(*args, **kwargs):
+            calls.append(1)
+            return response
+        original_get = sec_provider.SESSION.get
+        original_raise = response.raise_for_status if hasattr(response, "raise_for_status") else None
+        def raise_forbidden():
+            raise requests.HTTPError("403 Client Error: Forbidden")
+        response.raise_for_status = raise_forbidden
+        sec_provider.SESSION.get = forbidden
+        try:
+            with self.assertRaisesRegex(RuntimeError, "403"):
+                sec_provider._get_json("https://data.sec.gov/submissions/test.json")
+        finally:
+            sec_provider.SESSION.get = original_get
+            if original_raise is not None:
+                response.raise_for_status = original_raise
+        self.assertEqual(len(calls), 1)
+
     def test_sec_403_error_explains_user_agent_or_network_cause(self):
         message = sec_provider._sec_error(RuntimeError("HTTP 403 Forbidden"))
         self.assertIn("SEC_USER_AGENT", message)
