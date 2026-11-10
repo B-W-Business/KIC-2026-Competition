@@ -115,14 +115,15 @@ def _execute(code: str, inputs: Dict[str, Any], timeout: float = 15.0) -> Dict[s
         output = execution.text or ""
     parsed = json.loads(output.splitlines()[-1])
     required = {"divergence", "baseline_delta", "series_mean", "relative_gap_pct", "tolerance_exceeded"}
-    if not isinstance(parsed, dict) or not required.issubset(parsed):
+    if not isinstance(parsed, dict) or set(parsed) != required:
         raise ValueError("샌드박스 결과 스키마가 올바르지 않습니다.")
     for key in ("divergence", "baseline_delta"):
-        if not math.isfinite(float(parsed[key])):
+        if isinstance(parsed[key], bool) or not isinstance(parsed[key], (int, float)) or not math.isfinite(float(parsed[key])):
             raise ValueError("샌드박스가 유한한 수치를 반환하지 않았습니다.")
     for key in ("series_mean", "relative_gap_pct"):
-        if parsed[key] is not None and not math.isfinite(float(parsed[key])):
-            raise ValueError("샌드박스 {} 결과가 유한한 수치가 아닙니다.".format(key))
+        if parsed[key] is not None and (isinstance(parsed[key], bool) or not isinstance(parsed[key], (int, float))
+                                        or not math.isfinite(float(parsed[key]))):
+            raise ValueError("샌드박스 {} 결과가 유효한 수치가 아닙니다.".format(key))
     if not isinstance(parsed["tolerance_exceeded"], bool):
         raise ValueError("샌드박스의 허용 괴리 판정 형식이 올바르지 않습니다.")
     return parsed

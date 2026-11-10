@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os
 import time
+import math
 from datetime import datetime, timezone
 from kic_watch.security import safe_error
 from kic_watch.providers.http import _get_json
@@ -42,13 +43,20 @@ def _comtrade(query: str) -> dict:
         yearly_rows = payload.get("data", [])
         if not yearly_rows:
             raise RuntimeError("Comtrade 응답에 {}년 교역값이 없습니다. HS 코드를 확인하세요.".format(requested_year))
-        rows_by_year[requested_year] = sum(float(row.get("primaryValue") or row.get("netWgt") or 0) for row in yearly_rows)
+        raw_values = [row.get("primaryValue") for row in yearly_rows]
+        if any(value in (None, "") for value in raw_values):
+            raise RuntimeError("Comtrade {}년 응답에 금액(primaryValue)이 없어 무게(netWgt)로 대체하지 않았습니다.".format(requested_year))
+        values = [float(value) for value in raw_values]
+        if any(not math.isfinite(value) for value in values):
+            raise RuntimeError("Comtrade {}년 응답에 유효하지 않은 금액(primaryValue)이 포함되어 있습니다.".format(requested_year))
+        rows_by_year[requested_year] = sum(values)
     previous_year, latest_year = sorted(rows_by_year)
     previous_value, value = rows_by_year[previous_year], rows_by_year[latest_year]
-    if not value:
-        raise RuntimeError("Comtrade 응답에 교역값이 없습니다. HS 코드를 확인하세요.")
     growth = None if not previous_value else (value / previous_value - 1) * 100
-    series = [{"date": str(period), "value": value / 1e9} for period, value in sorted(rows_by_year.items())]
+    # The headline observation is YoY percent growth; the chart series are trade-value levels.
+    # Preserve that distinction so the UI does not label USD billions as percent.
+    series = [{"date": str(period), "value": amount / 1e9} for period, amount in sorted(rows_by_year.items())]
     return {"value": growth, "level": value, "date": str(latest_year), "period_key": str(latest_year), "unit": "% YoY",
-            "series": series, "detail": "미국 수입 HS {} 세계 전체, Comtrade primaryValue 전년 대비".format(hs)}
+            "series": series, "series_label": "미국 수입액 · HS {}".format(hs), "series_unit": "USD billion",
+            "detail": "미국 수입 HS {} 세계 전체, Comtrade primaryValue 전년 대비".format(hs)}
 

@@ -46,6 +46,8 @@ def load_state() -> Tuple[List[dict], List[dict]]:
 
 def save_assumption(assumption: Any) -> None:
     payload = asdict(assumption) if hasattr(assumption, "__dataclass_fields__") else assumption
+    if isinstance(payload, dict) and "tolerance_basis" not in payload:
+        payload["tolerance_basis"] = getattr(assumption, "tolerance_basis", "")
     with _session() as connection:
         connection.execute("INSERT OR REPLACE INTO assumptions (id, payload) VALUES (?, ?)",
                            (payload["id"], json.dumps(payload, ensure_ascii=False)))

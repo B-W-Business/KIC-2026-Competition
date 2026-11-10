@@ -1,5 +1,6 @@
 import os
 import datetime
+import json
 import sys
 import tempfile
 import types
@@ -189,6 +190,43 @@ class CodeInterpreterTests(unittest.TestCase):
         self.assertTrue(result["tolerance_exceeded"])
         self.assertAlmostEqual(result["relative_gap_pct"], -45.599535)
 
+    def test_e2b_rejects_extra_fields_and_non_numeric_json_numbers(self):
+        class FakeSandbox:
+            def __init__(self, output):
+                self.output = output
+            def run_code(self, _code, timeout=None):
+                return types.SimpleNamespace(error=None, logs=types.SimpleNamespace(stdout=[self.output]), text="")
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+
+        class Factory:
+            output = ""
+            @classmethod
+            def create(cls, **kwargs):
+                return FakeSandbox(cls.output)
+
+        prior = sys.modules.get("e2b_code_interpreter")
+        sys.modules["e2b_code_interpreter"] = types.SimpleNamespace(Sandbox=Factory)
+        inputs = {"baseline": 0, "target": 20, "tolerance": 10, "tolerance_basis": "relative",
+                  "observed": 10.880093, "series": [10.880093]}
+        valid = {"divergence": -9.119907, "baseline_delta": 10.880093, "series_mean": 10.880093,
+                 "relative_gap_pct": -45.599535, "tolerance_exceeded": True}
+        try:
+            with patch.dict(os.environ, {"E2B_API_KEY": "fake-e2b-test-key"}):
+                Factory.output = json.dumps({**valid, "unverified_extra": "ignored before"})
+                with self.assertRaisesRegex(ValueError, "스키마"):
+                    _execute(DETERMINISTIC_CODE, inputs)
+                Factory.output = json.dumps({**valid, "divergence": "-9.119907"})
+                with self.assertRaisesRegex(ValueError, "유한한 수치"):
+                    _execute(DETERMINISTIC_CODE, inputs)
+        finally:
+            if prior is None:
+                sys.modules.pop("e2b_code_interpreter", None)
+            else:
+                sys.modules["e2b_code_interpreter"] = prior
+
     def test_tolerance_basis_distinguishes_relative_percent_from_percentage_points(self):
         base = {"metric": "revenue_growth", "baseline": 0, "target": 20, "tolerance": 10}
         observation = {"value": 10.880093, "unit": "%"}
@@ -210,6 +248,13 @@ class CodeInterpreterTests(unittest.TestCase):
         self.assertEqual(relative["verdict"], "주의 관찰")
         self.assertEqual(zero_target["tolerance_basis"], "absolute")
         self.assertFalse(zero_target["tolerance_exceeded"])
+
+    def test_missing_rate_observation_keeps_percentage_point_tolerance_unit(self):
+        result = _compare({"metric": "revenue_growth", "baseline": 0, "target": 0,
+                          "tolerance": 5, "tolerance_basis": "relative"}, {"value": None, "unit": ""})
+        self.assertEqual(result["tolerance_basis"], "absolute")
+        self.assertEqual(result["delta_unit"], "%p")
+        self.assertEqual(result["threshold_unit"], "%p")
 
 
 class CredentialRedactionTests(unittest.TestCase):
@@ -502,6 +547,65 @@ class ProviderMappingTests(unittest.TestCase):
         self.assertTrue(all(params["flowCode"] == "M" for _, params in captured))
         self.assertTrue(all(params["subscription-key"] == "fake-primary-key" for _, params in captured))
         self.assertAlmostEqual(result["value"], 10)
+        self.assertEqual(result["unit"], "% YoY")
+        self.assertEqual(result["series_unit"], "USD billion")
+        self.assertEqual(result["series_label"], "미국 수입액 · HS 8542")
+        self.assertAlmostEqual(result["series"][0]["value"], 100 / 1e9)
+
+    def test_comtrade_keeps_zero_trade_value_instead_of_substituting_weight(self):
+        original = comtrade_provider._get_json
+        original_sleep = comtrade_provider.time.sleep
+        calls = {"n": 0}
+        def fake_get_json(_url, params):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"data": [{"period": params["period"], "primaryValue": 0, "netWgt": 900}]}
+            return {"data": [{"period": params["period"], "primaryValue": 10, "netWgt": 1000}]}
+        comtrade_provider._get_json = fake_get_json
+        comtrade_provider.time.sleep = lambda _seconds: None
+        try:
+            result = comtrade_provider._comtrade("8542")
+        finally:
+            comtrade_provider._get_json = original
+            comtrade_provider.time.sleep = original_sleep
+        self.assertIsNone(result["value"])  # the previous year is actually zero, not 900 kg
+        self.assertEqual(result["series"][0]["value"], 0)
+
+    def test_comtrade_rejects_missing_trade_value_instead_of_substituting_weight(self):
+        original = comtrade_provider._get_json
+        original_sleep = comtrade_provider.time.sleep
+        calls = {"n": 0}
+        def fake_get_json(_url, params):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"data": [{"period": params["period"], "primaryValue": None, "netWgt": 900}]}
+            return {"data": [{"period": params["period"], "primaryValue": 10, "netWgt": 1000}]}
+        comtrade_provider._get_json = fake_get_json
+        comtrade_provider.time.sleep = lambda _seconds: None
+        try:
+            with self.assertRaisesRegex(RuntimeError, "primaryValue"):
+                comtrade_provider._comtrade("8542")
+        finally:
+            comtrade_provider._get_json = original
+            comtrade_provider.time.sleep = original_sleep
+
+    def test_comtrade_reports_zero_latest_import_as_full_decline(self):
+        original = comtrade_provider._get_json
+        original_sleep = comtrade_provider.time.sleep
+        calls = {"n": 0}
+        def fake_get_json(_url, params):
+            calls["n"] += 1
+            value = 100 if calls["n"] == 1 else 0
+            return {"data": [{"period": params["period"], "primaryValue": value, "netWgt": 900}]}
+        comtrade_provider._get_json = fake_get_json
+        comtrade_provider.time.sleep = lambda _seconds: None
+        try:
+            result = comtrade_provider._comtrade("8542")
+        finally:
+            comtrade_provider._get_json = original
+            comtrade_provider.time.sleep = original_sleep
+        self.assertEqual(result["value"], -100.0)
+        self.assertEqual(result["series"][-1]["value"], 0)
 
     def test_comtrade_retries_with_secondary_key(self):
         captured = []
@@ -558,6 +662,18 @@ class PersistenceTests(unittest.TestCase):
         self.assertFalse(storage.claim_event(*key))
         assumptions, reports = storage.load_state()
         self.assertEqual(reports[0]["id"], "report-1")
+
+    def test_legacy_assumption_without_tolerance_basis_round_trips_to_relative_rule(self):
+        legacy = {"id": "legacy-rate", "ticker": "005930", "title": "Legacy revenue growth",
+                  "memo": "", "metric": "revenue_growth", "source": "OpenDART",
+                  "baseline": 0, "target": 20, "tolerance": 10, "query": "",
+                  "created_at": "2025-01-01T00:00:00+00:00", "enabled": True}
+        storage.save_assumption(legacy)
+        saved, _ = storage.load_state()
+        assumption = Assumption(**next(row for row in saved if row["id"] == "legacy-rate"))
+        result = _compare(assumption.__dict__, {"value": 10.880093, "unit": "%"})
+        self.assertEqual(result["tolerance_basis"], "relative")
+        self.assertTrue(result["tolerance_exceeded"])
 
     def test_failed_event_has_bounded_retries(self):
         key = ("NVDA", "0001-01-02", "assumption-1")

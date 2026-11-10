@@ -37,8 +37,16 @@ def company_fact_source(ticker: str) -> str:
 
 
 def tolerance_basis_for(assumption: Assumption) -> str:
-    basis = assumption.tolerance_basis or ("relative" if assumption.metric in ("revenue_growth", "gross_margin", "capex_growth", "trade_value") else "absolute")
+    basis = getattr(assumption, "tolerance_basis", "") or ("relative" if assumption.metric in ("revenue_growth", "gross_margin", "capex_growth", "trade_value") else "absolute")
     return "absolute" if assumption.target == 0 and basis == "relative" else basis
+
+
+def assumption_value_unit(metric: str) -> str:
+    if metric in ("revenue_growth", "gross_margin", "capex_growth", "trade_value"):
+        return "%"
+    if metric == "sam_awards":
+        return "건"
+    return "원자료 단위"
 
 
 def create_quickstart_assumption(ticker: str) -> Assumption:
@@ -81,6 +89,13 @@ else:
     st.session_state.reports = sorted(merged_reports.values(), key=lambda r: r.get("created_at", ""), reverse=True)
 if "events" not in st.session_state:
     st.session_state.events = []
+
+# Streamlit can preserve session objects created before a model field was added.
+# Normalize those in-memory assumptions so a hot reload doesn't break the UI.
+for _assumption in st.session_state.assumptions:
+    if not hasattr(_assumption, "tolerance_basis"):
+        setattr(_assumption, "tolerance_basis", "relative" if _assumption.metric in (
+            "revenue_growth", "gross_margin", "capex_growth", "trade_value") else "absolute")
 
 st.title("KIC 해외 포트폴리오 투자 가정 감시")
 st.caption("투자 가정을 기준선으로 저장하고, 공시·공공 데이터와 직접 검증합니다.")
@@ -146,22 +161,30 @@ with tab_monitor:
                 save_assumption(assumption)
                 st.rerun()
     else:
+        select_key = f"assumption_to_check_{ticker}"
+        non_demo = [a for a in active_assumptions if not a.title.startswith("[체험용]")]
+        preferred = max(non_demo or active_assumptions, key=lambda a: a.created_at)
+        current = st.session_state.get(select_key)
+        if current not in active_assumptions or (current.title.startswith("[체험용]") and non_demo):
+            st.session_state[select_key] = preferred
         assumption_to_check = st.selectbox(
             "즉시 검증할 가정", active_assumptions,
             format_func=lambda a: f"{a.title} · {METRIC_LABELS.get(a.metric, a.metric)}",
-            key=f"assumption_to_check_{ticker}")
+            key=select_key)
         st.caption("즉시 검증은 공시 감지와 별도로 원자료 조회·수치 계산·Red-Team 검토를 실행합니다. 성장률 지표의 기본 허용치는 목표 대비 상대 미달률입니다.")
         with st.container(border=True):
             display_basis = tolerance_basis_for(assumption_to_check)
+            unit = assumption_value_unit(assumption_to_check.metric)
             s1, s2, s3, s4 = st.columns(4)
             s1.metric("출처", company_fact_source(ticker) if assumption_to_check.metric in ("revenue_growth", "gross_margin", "capex_growth") else assumption_to_check.source)
-            s2.metric("기준값", "{:.2f}%".format(assumption_to_check.baseline))
-            s3.metric("목표값", "{:.2f}%".format(assumption_to_check.target))
-            s4.metric("허용 기준", "{:.2f}% 상대".format(assumption_to_check.tolerance) if display_basis == "relative" else "{:.2f} 절대".format(assumption_to_check.tolerance))
+            s2.metric("기준값", "{:.2f} {}".format(assumption_to_check.baseline, unit))
+            s3.metric("목표값", "{:.2f} {}".format(assumption_to_check.target, unit))
+            tolerance_unit = "%" if display_basis == "relative" else ("%p" if unit == "%" else unit)
+            s4.metric("허용 기준", "{:.2f} {} 상대".format(assumption_to_check.tolerance, tolerance_unit) if display_basis == "relative" else "{:.2f} {} 절대".format(assumption_to_check.tolerance, tolerance_unit))
             if display_basis == "relative":
-                st.caption("상대 미달률 = (관측값 − 목표값) ÷ |목표값| × 100 · 위험 기준: 상대 미달률 ≤ −허용치 · E2B와 로컬 산식의 전체 결과가 같아야 통과")
+                st.caption("상대 미달률 = (관측값 − 목표값) ÷ |목표값| × 100 · 위험 기준: 상대 미달률 < −허용치 · E2B와 로컬 산식의 전체 결과가 같아야 통과")
             else:
-                st.caption("절대 차이 = 관측값 − 목표값 · 위험 기준: 차이 ≤ −허용치 · E2B와 로컬 산식의 전체 결과가 같아야 통과")
+                st.caption("절대 차이 = 관측값 − 목표값 · 위험 기준: 차이 < −허용치 · E2B와 로컬 산식의 전체 결과가 같아야 통과")
         verify_col, scan_col = st.columns(2)
         with verify_col:
             verify_now = st.button("선택 가정 바로 검증", type="primary", width="stretch", key="verify_assumption")
@@ -386,28 +409,46 @@ with tab_reports:
             st.write(report["summary"])
             with st.container(border=True):
                 st.markdown("#### 판정 요약 · {}".format(report.get("period_display", "기간 미상")))
+                basis = report.get("tolerance_basis")
+                relative_gap = report.get("relative_gap_pct")
+                if report.get("tolerance_exceeded"):
+                    if basis == "relative" and relative_gap is not None:
+                        shortfall = abs(relative_gap) if relative_gap < 0 else relative_gap
+                        st.error("허용 한도 초과 · 목표 대비 미달률 {:.2f}% / 허용 한도 {}".format(
+                            shortfall, report.get("tolerance_display", "자료 없음")))
+                    else:
+                        st.error("허용 한도 초과 · 목표 대비 차이 {} / 허용 {}".format(
+                            "계산 불가" if report.get("target_gap") is None else "{:+.2f} {}".format(report["target_gap"], report.get("target_gap_unit", "")),
+                            report.get("tolerance_display", "자료 없음")))
                 c1, c2, c3, c4, c5 = st.columns(5)
+                target_gap_unit = report.get("target_gap_unit")
+                if not target_gap_unit:
+                    series_unit = report.get("series_unit")
+                    target_gap_unit = "%p" if series_unit in ("%", "% YoY") else (series_unit or "단위 미상")
                 c1.metric("초기 기준값", report.get("baseline_display", "자료 없음"))
                 c2.metric("실제 관측값", report.get("observed_display", "자료 없음"))
                 c3.metric("목표값", report.get("target_display", "자료 없음"))
-                c4.metric("목표 대비 차이", "계산 불가" if report.get("target_gap") is None else "{:+.2f} {}".format(report["target_gap"], "%p" if report.get("series_unit") == "%" else report.get("series_unit", "")))
-                c5.metric("허용 상대 미달률" if report.get("tolerance_basis") == "relative" else "허용 절대 차이",
-                          report.get("tolerance_display", "자료 없음"))
-                if report.get("relative_gap_pct") is not None:
-                    if report.get("tolerance_basis") == "relative":
-                        st.caption("판정 산식: (관측값 − 목표값) ÷ |목표값| × 100 = {:+.2f}% · 허용치 {} · 위험 조건: 상대 미달률 < −허용치".format(
-                            report["relative_gap_pct"], report.get("tolerance_display", "자료 없음")))
+                if basis == "relative":
+                    relative_label = "목표 대비 상대 미달률" if relative_gap is not None and relative_gap < 0 else "목표 대비 상대 차이"
+                    relative_value = "계산 불가" if relative_gap is None else "{:.2f}%".format(abs(relative_gap) if relative_gap < 0 else relative_gap)
+                    c4.metric(relative_label, relative_value)
+                    c5.metric("허용 한도", report.get("tolerance_display", "자료 없음"))
+                    st.caption("참고 · 목표 대비 절대 차이: {}".format(
+                        "계산 불가" if report.get("target_gap") is None else "{:+.2f} {}".format(report["target_gap"], target_gap_unit)))
+                    if relative_gap is not None:
+                        st.caption("판정 산식: (관측값 − 목표값) ÷ |목표값| × 100 = {:+.2f}% · 위험 조건: 상대 미달률 < −허용치".format(relative_gap))
                     else:
-                        absolute_gap = report.get("target_gap")
-                        st.caption("판정 산식: 관측값 − 목표값 = {} · 목표 대비 상대 미달률은 {} · 허용치 {} · 위험 조건: 절대 차이 < −허용치".format(
-                            "계산 불가" if absolute_gap is None else "{:+.2f}%p".format(absolute_gap),
-                            "계산 불가" if report.get("relative_gap_pct") is None else "{:+.2f}%".format(report["relative_gap_pct"]),
-                            report.get("tolerance_display", "자료 없음")))
-                if report.get("tolerance_exceeded"):
-                    st.error("허용 미달 한도를 넘었습니다 · {}".format(verdict))
-                elif verdict == "수치 검증 불가":
-                    st.warning("판정 보류 · 원자료에서 해당 수치를 계산하지 못했습니다.")
+                        st.caption("목표값이 0이라 상대 비율을 계산할 수 없습니다. 허용 기준을 절대 차이로 전환하세요.")
                 else:
+                    c4.metric("목표 대비 절대 차이", "계산 불가" if report.get("target_gap") is None else "{:+.2f} {}".format(report["target_gap"], target_gap_unit))
+                    c5.metric("허용 한도", report.get("tolerance_display", "자료 없음"))
+                    st.caption("판정 산식: 관측값 − 목표값 = {} · 위험 조건: 절대 차이 < −허용치".format(
+                        "계산 불가" if report.get("target_gap") is None else "{:+.2f} {}".format(report["target_gap"], target_gap_unit)))
+                    if relative_gap is not None:
+                        st.caption("참고 · 목표 대비 상대 차이: {:+.2f}%".format(relative_gap))
+                if not report.get("tolerance_exceeded") and verdict == "수치 검증 불가":
+                    st.warning("판정 보류 · 원자료에서 해당 수치를 계산하지 못했습니다.")
+                elif not report.get("tolerance_exceeded"):
                     st.warning("허용 범위 안 · {}".format(verdict) if verdict == "주의 관찰" else "{}".format(verdict))
                 st.caption(report.get("summary", ""))
             st.markdown("**핵심 반론**")

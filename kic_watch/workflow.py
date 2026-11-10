@@ -18,11 +18,13 @@ def _compare(assumption: dict, observation: dict) -> dict:
         basis = assumption.get("tolerance_basis") or ("relative" if assumption.get("metric") in ("revenue_growth", "gross_margin", "capex_growth", "trade_value") else "absolute")
         if float(assumption["target"]) == 0 and basis == "relative":
             basis = "absolute"
+        missing_value_unit = observation.get("unit") or metric_unit(assumption["metric"])
+        missing_delta_unit = "%p" if missing_value_unit in ("%", "% YoY") else missing_value_unit
         return {"verdict": "수치 검증 불가", "divergence": None, "baseline_delta": None,
                 "relative_gap_pct": None, "tolerance_exceeded": False, "tolerance_basis": basis,
                 "tolerance": float(assumption["tolerance"]), "threshold_gap": None,
-                "threshold_unit": "%" if basis == "relative" else ("%p" if observation.get("unit") in ("%", "% YoY") else observation.get("unit", "")),
-                "delta_unit": "%p" if observation.get("unit") in ("%", "% YoY") else observation.get("unit", ""),
+                "threshold_unit": "%" if basis == "relative" else missing_delta_unit,
+                "delta_unit": missing_delta_unit,
                 "summary": "외부 API는 자료를 반환했지만 선택한 지표의 수치를 산출할 수 없습니다. 기준선과 지표 정의를 재검토하세요."}
     target, tolerance = float(assumption["target"]), float(assumption["tolerance"])
     divergence = float(value) - target
