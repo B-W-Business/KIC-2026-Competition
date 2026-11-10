@@ -17,6 +17,7 @@ from kic_watch.agents import validate_claim_evidence
 from kic_watch.workflow import _comparison_node, _compare
 from kic_watch.workflow import run_review
 from kic_watch.models import Assumption
+from kic_watch.reporting import sandbox_status_for
 from kic_watch.providers.sec import _latest_matching_facts
 from kic_watch.providers import comtrade as comtrade_provider, fred as fred_provider, sam as sam_provider, sec as sec_provider, opendart as dart_provider
 import storage
@@ -338,6 +339,18 @@ class WorkflowIntegrationTests(unittest.TestCase):
         self.assertEqual(report["filing_accession"], "0001")
         self.assertFalse(report["sandbox_verified"])  # local fallback is not represented as a sandbox run
         self.assertTrue(report["red_team"])
+
+
+class ReportPresentationTests(unittest.TestCase):
+    def test_legacy_partial_verifier_never_claims_current_full_sandbox_check(self):
+        status = sandbox_status_for({"execution_mode": "e2b", "sandbox_verified": True}, legacy_report=True)
+        self.assertIn("레거시 리포트", status)
+        self.assertIn("미확인", status)
+        self.assertNotIn("통과", status)
+
+    def test_current_full_sandbox_verification_is_reported_as_passed(self):
+        status = sandbox_status_for({"execution_mode": "e2b", "sandbox_verified": True})
+        self.assertEqual(status, "E2B 전체 산식 대조 통과")
 
 
 class BackgroundServiceTests(unittest.TestCase):

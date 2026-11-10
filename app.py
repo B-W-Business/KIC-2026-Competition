@@ -14,6 +14,7 @@ load_dotenv()
 
 from kic_agent import COMPANIES, Assumption, run_review, seed_assumptions
 from kic_watch.monitor import monitor_ticker
+from kic_watch.reporting import sandbox_status_for
 from storage import load_state, save_assumption, save_report
 st.set_page_config(page_title="KIC Investment Assumption Watch", page_icon="🛡️", layout="wide")
 
@@ -165,7 +166,12 @@ with tab_monitor:
         non_demo = [a for a in active_assumptions if not a.title.startswith("[체험용]")]
         preferred = max(non_demo or active_assumptions, key=lambda a: a.created_at)
         current = st.session_state.get(select_key)
-        if current not in active_assumptions or (current.title.startswith("[체험용]") and non_demo):
+        default_marker = f"assumption_default_initialized_{ticker}"
+        if not st.session_state.get(default_marker):
+            if current not in active_assumptions or (current.title.startswith("[체험용]") and non_demo):
+                st.session_state[select_key] = preferred
+            st.session_state[default_marker] = True
+        elif current not in active_assumptions:
             st.session_state[select_key] = preferred
         assumption_to_check = st.selectbox(
             "즉시 검증할 가정", active_assumptions,
@@ -479,16 +485,7 @@ with tab_reports:
                 frame = pd.DataFrame(series)
                 st.plotly_chart(px.line(frame, x="date", y="value", title="기존 원자료 시계열 (단위 정보 없음)", markers=True), width="stretch")
             analysis = report.get("analysis") or {}
-            if analysis.get("execution_mode") == "not_run":
-                sandbox_status = "관측값 없음 · 계산 미실행"
-            elif "sandbox_verified" not in analysis:
-                sandbox_status = "검산 정보 없음 · 이전 버전 리포트"
-            elif analysis["sandbox_verified"]:
-                sandbox_status = "E2B 전체 산식 대조 통과"
-            elif analysis.get("execution_mode") == "e2b_unverified_fallback":
-                sandbox_status = "E2B 결과 불일치 · 로컬 안전 계산으로 대체"
-            else:
-                sandbox_status = "E2B 미실행 · 로컬 결정론 계산"
+            sandbox_status = sandbox_status_for(analysis, legacy_report)
             st.caption("계산 경로: {} · {} · 자동 수정: {}회".format(
                 analysis.get("execution_mode", "사용 안 함"), sandbox_status,
                 len(analysis.get("repair_attempts", []))))
