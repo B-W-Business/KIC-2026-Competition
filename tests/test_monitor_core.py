@@ -5,13 +5,15 @@ import tempfile
 import types
 import unittest
 import requests
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 from pathlib import Path
 
 from kic_watch.code_interpreter import DETERMINISTIC_CODE, _execute, analyze, validate_code
 from kic_watch.security import safe_error
 from kic_watch.agents import validate_claim_evidence
-from kic_watch.workflow import _comparison_node
+from kic_watch.workflow import _comparison_node, _compare
 from kic_watch.workflow import run_review
 from kic_watch.models import Assumption
 from kic_watch.providers.sec import _latest_matching_facts
@@ -44,7 +46,7 @@ class CodeInterpreterTests(unittest.TestCase):
         class FakeExecution:
             def __init__(self, fail=False):
                 self.error = types.SimpleNamespace(name="RuntimeError", value="synthetic failure") if fail else None
-                self.logs = types.SimpleNamespace(stdout=['{"divergence": -13, "baseline_delta": -8, "series_mean": 11}'])
+                self.logs = types.SimpleNamespace(stdout=['{"divergence": -13, "baseline_delta": -8, "series_mean": 11, "relative_gap_pct": -52, "tolerance_exceeded": true}'])
                 self.text = ""
 
         class FakeSandbox:
@@ -111,6 +113,103 @@ class CodeInterpreterTests(unittest.TestCase):
         self.assertEqual(calls["llm"], 2)
         self.assertNotIn(secret, calls["code"])
         self.assertNotIn(secret, calls["prompt"])
+
+    def test_sandbox_rejects_semantically_wrong_baseline_delta(self):
+        inputs = {"baseline": 0, "target": 20, "tolerance": 10, "tolerance_basis": "relative",
+                  "observed": 10.880093, "series": [10.880093]}
+        wrong_result = {"divergence": -9.119907, "baseline_delta": 20,
+                        "series_mean": 10.880093, "relative_gap_pct": -45.599535,
+                        "tolerance_exceeded": False}
+        with patch.dict(os.environ, {"E2B_API_KEY": "fake-e2b"}), \
+                patch("kic_watch.code_interpreter._generate_code", return_value="result = {}\nprint(json.dumps(result))"), \
+                patch("kic_watch.code_interpreter._execute", return_value=wrong_result):
+            result = analyze(inputs, max_repairs=0)
+        self.assertEqual(result["execution_mode"], "e2b_unverified_fallback")
+        self.assertFalse(result["sandbox_verified"])
+        self.assertAlmostEqual(result["result"]["baseline_delta"], 10.880093)
+        self.assertTrue(result["result"]["tolerance_exceeded"])
+
+    def test_sandbox_repairs_semantically_wrong_output_before_fallback(self):
+        inputs = {"baseline": 0, "target": 20, "tolerance": 10, "tolerance_basis": "relative",
+                  "observed": 10.880093, "series": [9.0, 10.880093]}
+        wrong_result = {"divergence": -9.119907, "baseline_delta": 20,
+                        "series_mean": 9.9400465, "relative_gap_pct": -45.599535,
+                        "tolerance_exceeded": False}
+        correct_result = {"divergence": -9.119907, "baseline_delta": 10.880093,
+                          "series_mean": 9.9400465, "relative_gap_pct": -45.599535,
+                          "tolerance_exceeded": True}
+        with patch.dict(os.environ, {"E2B_API_KEY": "fake-e2b"}), \
+                patch("kic_watch.code_interpreter._generate_code", side_effect=["result = {}\nprint(json.dumps(result))", DETERMINISTIC_CODE]) as generate, \
+                patch("kic_watch.code_interpreter._execute", side_effect=[wrong_result, correct_result]):
+            result = analyze(inputs, max_repairs=1)
+        self.assertEqual(result["execution_mode"], "e2b")
+        self.assertTrue(result["sandbox_verified"])
+        self.assertEqual(len(result["repair_attempts"]), 1)
+        self.assertEqual(generate.call_count, 2)
+
+    def test_e2b_payload_defines_tolerance_basis_and_executes_full_formula(self):
+        captured = {}
+
+        class Execution:
+            error = None
+            text = ""
+            logs = types.SimpleNamespace(stdout=[])
+
+        class FakeSandbox:
+            def run_code(self, code, timeout=None):
+                captured["code"] = code
+                stream = StringIO()
+                with redirect_stdout(stream):
+                    exec(code, {})
+                return types.SimpleNamespace(error=None, logs=types.SimpleNamespace(stdout=[stream.getvalue().strip()]), text="")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        class Factory:
+            @staticmethod
+            def create(**kwargs):
+                return FakeSandbox()
+
+        prior = sys.modules.get("e2b_code_interpreter")
+        sys.modules["e2b_code_interpreter"] = types.SimpleNamespace(Sandbox=Factory)
+        try:
+            with patch.dict(os.environ, {"E2B_API_KEY": "fake-e2b"}):
+                result = _execute(DETERMINISTIC_CODE, {"baseline": 0, "target": 20, "tolerance": 10,
+                                  "tolerance_basis": "relative", "observed": 10.880093, "series": [10.880093]})
+        finally:
+            if prior is None:
+                sys.modules.pop("e2b_code_interpreter", None)
+            else:
+                sys.modules["e2b_code_interpreter"] = prior
+        self.assertIn("tolerance_basis=inputs['tolerance_basis']", captured["code"])
+        self.assertTrue(result["tolerance_exceeded"])
+        self.assertAlmostEqual(result["relative_gap_pct"], -45.599535)
+
+    def test_tolerance_basis_distinguishes_relative_percent_from_percentage_points(self):
+        base = {"metric": "revenue_growth", "baseline": 0, "target": 20, "tolerance": 10}
+        observation = {"value": 10.880093, "unit": "%"}
+        relative = _compare({**base, "tolerance_basis": "relative"}, observation)
+        absolute = _compare({**base, "tolerance_basis": "absolute"}, observation)
+        self.assertAlmostEqual(relative["divergence"], -9.119907)
+        self.assertAlmostEqual(relative["relative_gap_pct"], -45.599535)
+        self.assertTrue(relative["tolerance_exceeded"])
+        self.assertEqual(relative["verdict"], "가정 훼손 위험")
+        self.assertFalse(absolute["tolerance_exceeded"])
+        self.assertEqual(absolute["verdict"], "주의 관찰")
+
+    def test_exact_tolerance_boundary_is_not_a_breach_and_zero_target_uses_absolute(self):
+        relative = _compare({"metric": "revenue_growth", "baseline": 0, "target": 20,
+                             "tolerance": 50, "tolerance_basis": "relative"}, {"value": 10, "unit": "%"})
+        zero_target = _compare({"metric": "revenue_growth", "baseline": 0, "target": 0,
+                                "tolerance": 1, "tolerance_basis": "relative"}, {"value": -0.5, "unit": "%"})
+        self.assertFalse(relative["tolerance_exceeded"])
+        self.assertEqual(relative["verdict"], "주의 관찰")
+        self.assertEqual(zero_target["tolerance_basis"], "absolute")
+        self.assertFalse(zero_target["tolerance_exceeded"])
 
 
 class CredentialRedactionTests(unittest.TestCase):
@@ -192,7 +291,7 @@ class WorkflowIntegrationTests(unittest.TestCase):
         self.assertTrue(report["claim_comparable"])
         self.assertEqual(report["verdict"], "가정 훼손 위험")
         self.assertEqual(report["filing_accession"], "0001")
-        self.assertTrue(report["sandbox_verified"])  # local deterministic calculation matches comparison
+        self.assertFalse(report["sandbox_verified"])  # local fallback is not represented as a sandbox run
         self.assertTrue(report["red_team"])
 
 
@@ -237,6 +336,8 @@ class ProviderMappingTests(unittest.TestCase):
             margin = dart_provider.company_fact("005930", "gross_margin")
         self.assertAlmostEqual(growth["value"], 20.0)
         self.assertEqual(growth["period_key"], "FY2025")
+        self.assertEqual(growth["series_unit"], "%")
+        self.assertAlmostEqual(growth["series"][-1]["value"], 20.0)
         self.assertEqual(margin["value"], 30.0)
         self.assertIn("rcpNo=20260301000001", margin["url"])
 

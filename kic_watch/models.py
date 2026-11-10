@@ -65,9 +65,14 @@ class Assumption:
     query: str
     created_at: str
     enabled: bool = True
+    # Relative percent of target for growth/margin metrics; absolute units otherwise.
+    tolerance_basis: str = ""
 
     @classmethod
     def create(cls, **kwargs: Any) -> "Assumption":
+        if not kwargs.get("tolerance_basis"):
+            kwargs["tolerance_basis"] = "relative" if kwargs.get("metric") in {
+                "revenue_growth", "gross_margin", "capex_growth", "trade_value"} else "absolute"
         return cls(id=str(uuid.uuid4())[:8], created_at=now_iso(), **kwargs)
 
 class ReviewState(TypedDict, total=False):

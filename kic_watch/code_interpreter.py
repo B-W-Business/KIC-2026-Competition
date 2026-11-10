@@ -18,13 +18,16 @@ MAX_AST_NODES = 180
 ALLOWED_CALLS = {"float", "int", "len", "sum", "min", "max", "abs", "round", "print"}
 ALLOWED_MODULE_CALLS = {("statistics", "mean"), ("statistics", "median"), ("statistics", "pstdev"), ("json", "dumps")}
 ALLOWED_IMPORTS = {"statistics", "math"}
-INPUT_NAMES = {"baseline", "target", "tolerance", "observed", "series", "statistics", "math", "json"}
+INPUT_NAMES = {"baseline", "target", "tolerance", "tolerance_basis", "observed", "series", "statistics", "math", "json"}
 
 DETERMINISTIC_CODE = """\
 divergence = float(observed) - float(target)
 baseline_delta = float(observed) - float(baseline)
 series_mean = statistics.mean(series) if series else None
-result = {"divergence": divergence, "baseline_delta": baseline_delta, "series_mean": series_mean}
+relative_gap_pct = (divergence / abs(float(target)) * 100) if float(target) != 0 else None
+tolerance_exceeded = (relative_gap_pct < -float(tolerance)) if tolerance_basis == "relative" and relative_gap_pct is not None else divergence < -float(tolerance)
+result = {"divergence": divergence, "baseline_delta": baseline_delta, "series_mean": series_mean,
+          "relative_gap_pct": relative_gap_pct, "tolerance_exceeded": tolerance_exceeded}
 print(json.dumps(result))
 """
 
@@ -39,7 +42,7 @@ def validate_code(code: str) -> str:
     allowed_nodes = (ast.Module, ast.Import, ast.alias, ast.Assign, ast.Name, ast.Load, ast.Store,
                      ast.Constant, ast.Expr, ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.Div,
                      ast.Mod, ast.UnaryOp, ast.UAdd, ast.USub, ast.IfExp, ast.Compare,
-                     ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.BoolOp,
+                     ast.Eq, ast.NotEq, ast.Is, ast.IsNot, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.BoolOp,
                      ast.And, ast.Or, ast.Call, ast.Attribute, ast.Dict, ast.List, ast.Tuple,
                      ast.Subscript, ast.Slice)
     if any(not isinstance(node, allowed_nodes) for node in nodes):
@@ -78,8 +81,8 @@ def _generate_code(context: Dict[str, Any], repair_error: Optional[str] = None) 
     schema = {"type": "object", "properties": {"code": {"type": "string"}},
               "required": ["code"], "additionalProperties": False}
     prompt = {
-        "task": "Create a short Python snippet using only scalar arithmetic, lists, and statistics.mean/median/pstdev. Inputs baseline, target, tolerance, observed, series and imported modules statistics/math already exist. Assign a JSON-serializable dictionary to result with divergence (observed-target), baseline_delta, and series_mean. Do not import anything, access files/network/environment, call any function except float/int/len/sum/min/max/abs/round/statistics.mean/median/pstdev, define functions/classes, or use loops. Finish with print(json.dumps(result)); json is preloaded.",
-        "data_shape": {"baseline": "number", "target": "number", "tolerance": "number", "observed": "number", "series": "list[number]"},
+        "task": "Create a short Python snippet using only scalar arithmetic and statistics.mean. Inputs baseline, target, tolerance, tolerance_basis, observed, series and imported modules statistics/math already exist. Return exact formulas: divergence=observed-target; baseline_delta=observed-baseline (signed); series_mean=mean(series) or None; relative_gap_pct=100*divergence/abs(target) or None if target is zero; tolerance_exceeded is relative_gap_pct < -tolerance when tolerance_basis is 'relative' and target is nonzero, otherwise divergence < -tolerance. Do not import, access files/network/environment, define functions/classes, or use loops. Finish with print(json.dumps(result)); json is preloaded.",
+        "data_shape": {"baseline": "number", "target": "number", "tolerance": "number", "tolerance_basis": "relative|absolute", "observed": "number", "series": "list[number]"},
         "repair_error": safe_error(repair_error) if repair_error else None,
         "prior_code": context.get("prior_code") if repair_error else None,
     }
@@ -98,9 +101,10 @@ def _execute(code: str, inputs: Dict[str, Any], timeout: float = 15.0) -> Dict[s
         raise RuntimeError("E2B_API_KEY가 없어 격리 샌드박스에 접속할 수 없습니다.")
     from e2b_code_interpreter import Sandbox
     safe_inputs = {key: inputs[key] for key in ("baseline", "target", "tolerance", "observed", "series")}
+    safe_inputs["tolerance_basis"] = inputs.get("tolerance_basis", "absolute")
     prelude = "import json, statistics, math\n"
     prelude += "inputs = json.loads(" + repr(json.dumps(safe_inputs, allow_nan=False)) + ")\n"
-    prelude += "baseline=inputs['baseline']; target=inputs['target']; tolerance=inputs['tolerance']; observed=inputs['observed']; series=inputs['series']\n"
+    prelude += "baseline=inputs['baseline']; target=inputs['target']; tolerance=inputs['tolerance']; tolerance_basis=inputs['tolerance_basis']; observed=inputs['observed']; series=inputs['series']\n"
     execution_code = prelude + validate_code(code)
     with Sandbox.create(timeout=60, api_key=api_key, allow_internet_access=False) as sandbox:
         execution = sandbox.run_code(execution_code, timeout=timeout)
@@ -110,33 +114,63 @@ def _execute(code: str, inputs: Dict[str, Any], timeout: float = 15.0) -> Dict[s
     if not output:
         output = execution.text or ""
     parsed = json.loads(output.splitlines()[-1])
-    if not isinstance(parsed, dict) or not {"divergence", "baseline_delta", "series_mean"}.issubset(parsed):
+    required = {"divergence", "baseline_delta", "series_mean", "relative_gap_pct", "tolerance_exceeded"}
+    if not isinstance(parsed, dict) or not required.issubset(parsed):
         raise ValueError("샌드박스 결과 스키마가 올바르지 않습니다.")
     for key in ("divergence", "baseline_delta"):
         if not math.isfinite(float(parsed[key])):
             raise ValueError("샌드박스가 유한한 수치를 반환하지 않았습니다.")
-    if parsed["series_mean"] is not None and not math.isfinite(float(parsed["series_mean"])):
-        raise ValueError("샌드박스 평균이 유한한 수치가 아닙니다.")
+    for key in ("series_mean", "relative_gap_pct"):
+        if parsed[key] is not None and not math.isfinite(float(parsed[key])):
+            raise ValueError("샌드박스 {} 결과가 유한한 수치가 아닙니다.".format(key))
+    if not isinstance(parsed["tolerance_exceeded"], bool):
+        raise ValueError("샌드박스의 허용 괴리 판정 형식이 올바르지 않습니다.")
     return parsed
+
+
+def _deterministic_result(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    observed, target = float(inputs["observed"]), float(inputs["target"])
+    divergence = observed - target
+    tolerance = float(inputs["tolerance"])
+    basis = inputs.get("tolerance_basis", "absolute")
+    relative_gap_pct = divergence / abs(target) * 100 if target != 0 else None
+    tolerance_exceeded = (relative_gap_pct < -tolerance if basis == "relative" and relative_gap_pct is not None
+                          else divergence < -tolerance)
+    series = inputs.get("series", [])
+    return {"divergence": divergence, "baseline_delta": observed - float(inputs["baseline"]),
+            "series_mean": sum(series) / len(series) if series else None,
+            "relative_gap_pct": relative_gap_pct, "tolerance_exceeded": tolerance_exceeded}
+
+
+def _matches_expected(candidate: Dict[str, Any], expected: Dict[str, Any]) -> bool:
+    for key in ("divergence", "baseline_delta", "series_mean", "relative_gap_pct"):
+        actual, wanted = candidate.get(key), expected.get(key)
+        if actual is None or wanted is None:
+            if actual is not wanted:
+                return False
+        elif not math.isclose(float(actual), float(wanted), rel_tol=1e-9, abs_tol=1e-8):
+            return False
+    return candidate.get("tolerance_exceeded") is expected["tolerance_exceeded"]
 
 
 def analyze(inputs: Dict[str, Any], *, max_repairs: int = 2) -> Dict[str, Any]:
     """Generate, validate, execute, and self-correct code; use deterministic fallback if unavailable."""
     code = DETERMINISTIC_CODE
     attempts = []
+    expected = _deterministic_result(inputs)
     if not os.getenv("E2B_API_KEY"):
-        fallback = {"divergence": float(inputs["observed"]) - float(inputs["target"]),
-                    "baseline_delta": float(inputs["observed"]) - float(inputs["baseline"]),
-                    "series_mean": sum(inputs.get("series", [])) / len(inputs["series"]) if inputs.get("series") else None}
-        return {"result": fallback, "code": DETERMINISTIC_CODE, "execution_mode": "local_fallback",
-                "repair_attempts": [], "fallback_reason": "E2B_API_KEY 미설정"}
+        return {"result": expected, "code": DETERMINISTIC_CODE, "execution_mode": "local_fallback",
+                "sandbox_verified": False, "repair_attempts": [], "fallback_reason": "E2B_API_KEY 미설정"}
     try:
         code = _generate_code(inputs)
         for attempt in range(max_repairs + 1):
             try:
                 code = validate_code(code)
                 result = _execute(code, inputs)
-                return {"result": result, "code": code, "execution_mode": "e2b", "repair_attempts": attempts}
+                if not _matches_expected(result, expected):
+                    raise ValueError("E2B 결과가 로컬 기준식과 불일치합니다. 차이·기준 대비 변화·상대 괴리율·허용폭 판정을 다시 계산하세요.")
+                return {"result": result, "code": code, "execution_mode": "e2b", "sandbox_verified": True,
+                        "repair_attempts": attempts, "fallback_reason": ""}
             except Exception as exc:
                 error = safe_error(exc)
                 attempts.append(error)
@@ -145,9 +179,6 @@ def analyze(inputs: Dict[str, Any], *, max_repairs: int = 2) -> Dict[str, Any]:
                 code = _generate_code({**inputs, "prior_code": code}, repair_error=error)
     except Exception as exc:
         safe_message = safe_error(exc)
-        fallback = {"divergence": float(inputs["observed"]) - float(inputs["target"]),
-                    "baseline_delta": float(inputs["observed"]) - float(inputs["baseline"]),
-                    "series_mean": sum(inputs.get("series", [])) / len(inputs["series"]) if inputs.get("series") else None}
-        return {"result": fallback, "code": DETERMINISTIC_CODE, "execution_mode": "local_fallback",
-                "repair_attempts": attempts, "fallback_reason": safe_message}
+        return {"result": expected, "code": code, "execution_mode": "e2b_unverified_fallback",
+                "sandbox_verified": False, "repair_attempts": attempts, "fallback_reason": safe_message}
     raise RuntimeError("분석 엔진에서 예상하지 못한 종료")

@@ -5,7 +5,6 @@ import time
 from typing import Any, Optional
 import requests
 from dotenv import load_dotenv
-from kic_watch.security import safe_error
 
 load_dotenv()
 
@@ -20,7 +19,8 @@ def _get_json(url: str, params: Optional[dict] = None, timeout: int = 25,
         try:
             response = SESSION.get(url, params=params, timeout=timeout, headers=headers)
             if response.status_code in (429, 500, 502, 503, 504):
-                last_error = "HTTP {} from {}".format(response.status_code, response.url)
+                # Never persist response.url: provider query parameters can contain API credentials.
+                last_error = "HTTP {}".format(response.status_code)
                 try:
                     wait = min(float(response.headers.get("Retry-After", 2 ** attempt)), 8)
                 except (TypeError, ValueError):
@@ -32,9 +32,12 @@ def _get_json(url: str, params: Optional[dict] = None, timeout: int = 25,
         except requests.HTTPError as exc:
             # A 403/404 is a definitive access/resource response, not a transient outage.
             # Repeating denied SEC requests can worsen fair-access restrictions.
-            raise RuntimeError("API 요청 실패: {} ({})".format(url, safe_error(exc))) from exc
+            status = getattr(getattr(exc, "response", None), "status_code", getattr(response, "status_code", "HTTP error"))
+            raise RuntimeError("API 요청 실패: {} ({})".format(url.split("?", 1)[0], status)) from exc
         except (requests.RequestException, ValueError) as exc:
-            last_error = safe_error(exc)
+            # Requests exceptions often embed the full URL, including secret query parameters.
+            # Surface only a sanitized exception class; detailed networking traces stay out of UI/logs.
+            last_error = type(exc).__name__
             if attempt < 3:
                 time.sleep(min(2 ** attempt, 8))
     raise RuntimeError("API 요청 실패: {} ({})".format(url, last_error))

@@ -69,14 +69,14 @@ def _account(rows: tuple, kind: str) -> Optional[dict]:
     return None
 
 
-def _year_rows(corp_code: str, max_years: int = 6) -> list[tuple[int, tuple]]:
+def _year_rows(corp_code: str, max_years: int = 7) -> list[tuple[int, tuple]]:
     year = date.today().year
     found = []
     for candidate_year in range(year, year - max_years, -1):
         rows = _annual_accounts(corp_code, candidate_year)
         if rows:
             found.append((candidate_year, rows))
-            if len(found) == 2:
+            if len(found) == 6:
                 break
     return found
 
@@ -115,20 +115,31 @@ def company_fact(ticker: str, metric: str) -> dict:
             current_row.get("account_nm", ""), previous_year,
             previous_row.get("account_nm", ""))
     series = []
-    for series_year, series_rows in reversed(yearly):
-        row = _account(series_rows, "gross_profit" if metric == "gross_margin" else ("capex" if metric == "capex_growth" else "revenue"))
-        amount = _amount(row) if row else None
+    ordered_years = list(reversed(yearly))
+    kind = "gross_profit" if metric == "gross_margin" else ("capex" if metric == "capex_growth" else "revenue")
+    for index, (series_year, series_rows) in enumerate(ordered_years):
+        numerator_row = _account(series_rows, kind)
+        numerator = _amount(numerator_row) if numerator_row else None
         if metric == "gross_margin":
-            revenue = _account(series_rows, "revenue")
-            revenue_amount = _amount(revenue) if revenue else None
-            amount = (100 * amount / revenue_amount) if amount is not None and revenue_amount else None
-        if amount is not None:
-            series.append({"date": "{}-12-31".format(series_year), "value": amount / 1_000_000_000})
+            revenue_row = _account(series_rows, "revenue")
+            revenue = _amount(revenue_row) if revenue_row else None
+            rate = 100 * numerator / revenue if numerator is not None and revenue else None
+        elif index > 0:
+            previous_rows = ordered_years[index - 1][1]
+            previous_row = _account(previous_rows, kind)
+            previous = _amount(previous_row) if previous_row else None
+            rate = (numerator / previous - 1) * 100 if numerator is not None and previous else None
+        else:
+            rate = None
+        if rate is not None:
+            series.append({"date": "{}-12-31".format(series_year), "value": rate})
     receipt = next((row.get("rcept_no") for row in rows if row.get("rcept_no")), "")
     source_url = ("https://dart.fss.or.kr/dsaf001/main.do?rcpNo=" + receipt) if receipt else url
+    series_label = {"revenue_growth": "매출 연간 성장률", "gross_margin": "연간 매출총이익률",
+                    "capex_growth": "설비투자 연간 성장률"}[metric]
     return {"value": value, "date": "{}-12-31".format(year), "period_key": "FY{}".format(year),
-            "unit": "%", "series": series, "url": source_url,
-            "detail": detail + " · 금액은 API 원 단위, 차트는 십억원 단위"}
+            "unit": "%", "series": series, "series_label": series_label, "series_unit": "%",
+            "url": source_url, "detail": detail + " · 연결 연간 계정으로 계산"}
 
 
 def scan_company(ticker: str, assumptions: list) -> dict:

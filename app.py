@@ -36,6 +36,11 @@ def company_fact_source(ticker: str) -> str:
     return "OpenDART 연결 재무제표" if COMPANIES[ticker].get("market") == "KR" else "SEC Company Facts"
 
 
+def tolerance_basis_for(assumption: Assumption) -> str:
+    basis = assumption.tolerance_basis or ("relative" if assumption.metric in ("revenue_growth", "gross_margin", "capex_growth", "trade_value") else "absolute")
+    return "absolute" if assumption.target == 0 and basis == "relative" else basis
+
+
 def create_quickstart_assumption(ticker: str) -> Assumption:
     """Create an explicitly illustrative first-run assumption for the selected issuer."""
     if COMPANIES[ticker].get("market") == "KR":
@@ -145,7 +150,18 @@ with tab_monitor:
             "즉시 검증할 가정", active_assumptions,
             format_func=lambda a: f"{a.title} · {METRIC_LABELS.get(a.metric, a.metric)}",
             key=f"assumption_to_check_{ticker}")
-        st.caption("즉시 검증은 SEC 공시 감지와 별도로 데이터 수집·계산·Red-Team 흐름을 실행합니다. OpenAI/E2B 키 사용 시 사용량 과금이 발생할 수 있습니다.")
+        st.caption("즉시 검증은 공시 감지와 별도로 원자료 조회·수치 계산·Red-Team 검토를 실행합니다. 성장률 지표의 기본 허용치는 목표 대비 상대 미달률입니다.")
+        with st.container(border=True):
+            display_basis = tolerance_basis_for(assumption_to_check)
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric("출처", company_fact_source(ticker) if assumption_to_check.metric in ("revenue_growth", "gross_margin", "capex_growth") else assumption_to_check.source)
+            s2.metric("기준값", "{:.2f}%".format(assumption_to_check.baseline))
+            s3.metric("목표값", "{:.2f}%".format(assumption_to_check.target))
+            s4.metric("허용 기준", "{:.2f}% 상대".format(assumption_to_check.tolerance) if display_basis == "relative" else "{:.2f} 절대".format(assumption_to_check.tolerance))
+            if display_basis == "relative":
+                st.caption("상대 미달률 = (관측값 − 목표값) ÷ |목표값| × 100 · 위험 기준: 상대 미달률 ≤ −허용치 · E2B와 로컬 산식의 전체 결과가 같아야 통과")
+            else:
+                st.caption("절대 차이 = 관측값 − 목표값 · 위험 기준: 차이 ≤ −허용치 · E2B와 로컬 산식의 전체 결과가 같아야 통과")
         verify_col, scan_col = st.columns(2)
         with verify_col:
             verify_now = st.button("선택 가정 바로 검증", type="primary", width="stretch", key="verify_assumption")
@@ -173,7 +189,7 @@ with tab_monitor:
         st.session_state.events = result.get("events", [])
         if result.get("error"):
             st.error(result["error"], title="공시 목록을 가져오지 못했습니다")
-            st.info("공시 조회가 막혀도 FRED·UN Comtrade·SAM.gov 지표는 ‘선택 가정 바로 검증’으로 사용할 수 있습니다.")
+            st.info("공시 목록 조회와 별개로, 투자 가정 탭의 ‘검증 실행’ 또는 모니터링의 ‘선택 가정 바로 검증’에서 연결 데이터 출처를 직접 조회할 수 있습니다.")
         else:
             st.success(f"최근 공시 {len(result['events'])}건 확인 · 가정 연관 이벤트 {len(result['matched'])}건")
             if result.get("source_warning"):
@@ -188,7 +204,7 @@ with tab_monitor:
                 st.error("이벤트 처리 실패. 제한된 재시도 대상으로 기록했습니다: " + error)
             if result["matched"]:
                 st.success("관련 공시의 팩트체크와 Red-Team 리포트를 자동 생성했습니다. 검증 리포트 탭에서 확인하세요.")
-            with st.expander("확인한 SEC 공시"):
+            with st.expander(f"확인한 {issuer_label} 공시"):
                 for event in result["events"]:
                     st.markdown(f"- [{event['form']} · {event['filing_date']}]({event['url']})")
     if not should_scan and st.session_state.events:
@@ -222,7 +238,20 @@ with tab_baseline:
         unit_label = "%" if a_metric in ("revenue_growth", "gross_margin", "capex_growth", "trade_value") else ("건" if a_metric == "sam_awards" else "원자료 단위")
         a_baseline = c1.number_input(f"기준값 ({unit_label})", value=0.0, step=1.0)
         a_target = c2.number_input(f"목표값 ({unit_label})", value=20.0, step=1.0)
-        a_tolerance = c3.number_input(f"허용 괴리 ({unit_label})", value=10.0, min_value=0.0, step=1.0)
+        is_rate_metric = a_metric in ("revenue_growth", "gross_margin", "capex_growth", "trade_value")
+        tolerance_basis_label = "absolute"
+        if is_rate_metric:
+            basis_options = ["absolute"] if a_target == 0 else ["relative", "absolute"]
+            tolerance_basis_label = c3.radio("허용치 기준", basis_options,
+                format_func=lambda basis: "목표 대비 상대 미달률 (%)" if basis == "relative" else "절대 차이 (%p)",
+                horizontal=True, key=f"assumption_tolerance_basis_{a_target == 0}")
+            if a_target == 0:
+                c3.caption("목표값 0%는 상대 비율 계산이 불가해 절대 %p 기준을 사용합니다.")
+        tolerance_input_label = ("허용 상대 미달률 (%)" if tolerance_basis_label == "relative"
+                                 else f"허용 절대 차이 ({'%p' if is_rate_metric else unit_label})")
+        a_tolerance = c3.number_input(tolerance_input_label,
+                                      value=10.0, min_value=0.0, step=1.0,
+                                      help="목표 대비 상대 미달률이 이 값보다 크면 위험 판정합니다." if tolerance_basis_label == "relative" else "관측값과 목표값의 절대 차이가 이 값보다 크면 위험 판정합니다.")
         query_defaults = {"fred_series": "DGS10", "trade_value": "8542", "sam_awards": COMPANIES[ticker]["name"]}
         query_placeholder = {"fred_series": "예: DGS10 (미국 10년물 금리)", "trade_value": "예: 8542 (반도체)",
                              "sam_awards": "예: 기업명 또는 조달 키워드", "revenue_growth": "별도 키 불필요",
@@ -235,7 +264,7 @@ with tab_baseline:
         assumption = Assumption.create(
             ticker=ticker, title=a_title.strip(), memo=a_text.strip(), metric=a_metric,
             source=a_source, baseline=a_baseline, target=a_target,
-            tolerance=a_tolerance, query=a_note.strip())
+            tolerance=a_tolerance, tolerance_basis=tolerance_basis_label, query=a_note.strip())
         st.session_state.assumptions.append(assumption)
         save_assumption(assumption)
         st.success("투자 가정을 기준선에 등록했습니다.")
@@ -245,15 +274,57 @@ with tab_baseline:
         st.error("선택한 출처의 조회 키를 입력하세요.")
     selected = [a for a in st.session_state.assumptions if a.ticker == ticker]
     if selected:
-        rows = [{"감시": a.enabled, "제목": a.title, "지표": a.metric, "출처": a.source, "기준값": a.baseline, "목표": a.target, "허용 괴리": a.tolerance, "등록": a.created_at} for a in selected]
+        rows = [{"감시": a.enabled, "제목": a.title, "지표": a.metric, "출처": a.source,
+                 "기준값": a.baseline, "목표": a.target,
+                 "허용 기준": "목표 대비 상대 미달률 (%)" if tolerance_basis_for(a) == "relative" else "절대 차이 (%p/원자료 단위)",
+                 "허용치": a.tolerance, "등록": a.created_at} for a in selected]
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-        with st.expander("가정 메모와 세부값"):
-            for a in selected:
+        for a in selected:
+            if st.button(f"검증 실행 · {a.title}", key=f"verify_baseline_{a.id}", type="primary" if a.enabled else "secondary", disabled=not a.enabled):
+                manual_event = {"form": "수동 검증", "url": "", "claim": "", "evidence_quote": "",
+                                "numeric_claim": None, "claim_metric": "unknown", "claim_unit": "", "claim_period": ""}
+                with st.spinner(f"{a.source} 원자료로 {a.title} 검증 중…"):
+                    report = run_review(a, manual_event)
+                save_report(report)
+                st.session_state.reports.insert(0, report)
+                st.success("리포트를 저장했습니다. ‘검증 리포트’ 탭에서 확인하세요.")
+        st.markdown("#### 기준선 편집")
+        for a in selected:
+            with st.expander(a.title):
                 enabled = st.checkbox("감시 활성화", value=a.enabled, key=f"assumption_active_{a.id}")
                 if enabled != a.enabled:
                     a.enabled = enabled
                     save_assumption(a)
-                st.markdown(f"**{a.title}**  \n{a.memo or '메모 없음'} · ID `{a.id}` · 쿼리 `{a.query or '기본값'}`")
+                st.caption(f"{a.source} · 지표 `{a.metric}` · ID `{a.id}`")
+                with st.form(f"edit_assumption_{a.id}"):
+                    edited_title = st.text_input("가정 제목", value=a.title)
+                    edited_memo = st.text_area("투자 메모와 근거", value=a.memo)
+                    ec1, ec2, ec3 = st.columns(3)
+                    edit_unit = "%" if a.metric in ("revenue_growth", "gross_margin", "capex_growth", "trade_value") else ("건" if a.metric == "sam_awards" else "원자료 단위")
+                    edited_baseline = ec1.number_input(f"기준값 ({edit_unit})", value=float(a.baseline), step=1.0)
+                    edited_target = ec2.number_input(f"목표값 ({edit_unit})", value=float(a.target), step=1.0)
+                    is_rate = a.metric in ("revenue_growth", "gross_margin", "capex_growth", "trade_value")
+                    basis_options = (["absolute"] if edited_target == 0 else ["relative", "absolute"]) if is_rate else ["absolute"]
+                    current_basis = tolerance_basis_for(a)
+                    edited_basis = st.radio("허용치 기준", basis_options,
+                        index=basis_options.index(current_basis) if current_basis in basis_options else 0,
+                        format_func=lambda basis: "목표 대비 상대 미달률 (%)" if basis == "relative" else "절대 차이 (%p/원자료 단위)",
+                        horizontal=True, key=f"edit_basis_{a.id}_{edited_target == 0}")
+                    edited_tolerance = ec3.number_input(
+                        "허용 상대 미달률 (%)" if edited_basis == "relative" else f"허용 절대 차이 ({'%p' if is_rate else edit_unit})",
+                        value=float(a.tolerance), min_value=0.0, step=1.0)
+                    edited_query = st.text_input("출처 조회 키", value=a.query)
+                    save_edits = st.form_submit_button("가정 변경 저장", type="primary")
+                if save_edits:
+                    if not edited_title.strip():
+                        st.error("가정 제목을 입력하세요.")
+                    else:
+                        a.title, a.memo = edited_title.strip(), edited_memo.strip()
+                        a.baseline, a.target = edited_baseline, edited_target
+                        a.tolerance, a.tolerance_basis = edited_tolerance, edited_basis
+                        a.query = edited_query.strip()
+                        save_assumption(a)
+                        st.success("가정과 허용 기준을 저장했습니다.")
     else:
         st.caption("선택한 기업에 등록된 기준선이 없습니다.")
 
@@ -262,6 +333,24 @@ with tab_reports:
     reports = [r for r in st.session_state.reports if r.get("ticker") == ticker]
     if not reports:
         st.info("아직 리포트가 없습니다. 모니터링 탭에서 가정을 선택하고 ‘바로 검증’을 누르세요.", title="첫 검증 실행")
+    else:
+        risk_count = sum("위험" in r.get("verdict", "") or "훼손" in r.get("verdict", "") for r in reports)
+        watch_count = sum("주의" in r.get("verdict", "") for r in reports)
+        pending_count = sum("보류" in r.get("verdict", "") or "검증 불가" in r.get("verdict", "") for r in reports)
+        with st.container(horizontal=True):
+            st.metric("위험 신호", risk_count, border=True)
+            st.metric("주의 관찰", watch_count, border=True)
+            st.metric("판정 보류", pending_count, border=True)
+            st.metric("검증 기록", len(reports), border=True)
+        history_rows = [{
+            "판정": r.get("verdict", "검토 필요"), "가정": r.get("title", ""),
+            "관측 기간": r.get("period_display", "이전 버전"), "관측값": r.get("observed_display", "자료 없음"),
+            "목표": r.get("target_display", "이전 버전"), "목표 대비 차이":
+                "계산 불가" if r.get("target_gap") is None else "{:+.2f} {}".format(
+                    r["target_gap"], "%p" if r.get("target_gap_unit") == "%p" or r.get("series_unit") == "%" else r.get("target_gap_unit", "")),
+            "출처": r.get("source_name", ""), "조회 시각": r.get("created_at", ""),
+        } for r in reports]
+        st.dataframe(pd.DataFrame(history_rows), width="stretch", hide_index=True)
     for report in reports:
         verdict = report.get("verdict", "검토 필요")
         with st.container(border=True):
@@ -269,8 +358,23 @@ with tab_reports:
             origin = report.get("filing_form", "")
             filing_url = report.get("filing_url", "")
             metadata = f"{report['created_at']} · {report['source_name']} · {origin}"
-            metadata += f" · [공시 원문]({filing_url})" if filing_url else " · SEC 공시를 거치지 않은 직접 검증"
+            metadata += f" · [공시 원문]({filing_url})" if filing_url else " · 공시 감지 없이 실행한 직접 검증"
             st.caption(metadata)
+            old_analysis = report.get("analysis") or {}
+            legacy_report = (not report.get("target_display") or
+                             (old_analysis.get("execution_mode") in ("e2b", "local_fallback")
+                              and "sandbox_verified" not in old_analysis))
+            if legacy_report:
+                st.warning("이 리포트는 다항목 샌드박스 검산 및 상대 허용치가 적용되기 전 버전입니다. 아래 버튼으로 현재 기준에 맞춰 다시 검증하세요.")
+                legacy_assumption = next((a for a in st.session_state.assumptions if a.id == report.get("assumption_id")), None)
+                if legacy_assumption and st.button("현재 계산 기준으로 재검증", key=f"rerun_legacy_{report.get('id')}", type="primary"):
+                    event = {"form": "수동 재검증", "url": "", "claim": "", "evidence_quote": "",
+                             "numeric_claim": None, "claim_metric": "unknown", "claim_unit": "", "claim_period": ""}
+                    with st.spinner("현재 원자료와 허용 기준으로 다시 검증 중…"):
+                        refreshed = run_review(legacy_assumption, event)
+                    save_report(refreshed)
+                    st.session_state.reports.insert(0, refreshed)
+                    st.rerun()
             if report.get("claim"):
                 st.write("**공시에서 포착한 주장:** " + report["claim"])
             if report.get("claim_evidence_quote"):
@@ -280,10 +384,32 @@ with tab_reports:
                 st.caption("명시 수치 주장: {} {} · {} · 기간 {}".format(report["claim_numeric"], report.get("claim_unit", ""), report.get("claim_metric", ""), report.get("claim_period", "미상")) + " · " + comparison_text)
             st.markdown(f"**판정: {verdict}**")
             st.write(report["summary"])
-            c1, c2, c3 = st.columns(3)
-            c1.metric("기준값", report.get("baseline_display", "자료 없음"))
-            c2.metric("관측값", report.get("observed_display", "자료 없음"))
-            c3.metric("괴리", report.get("divergence_display", "계산 불가"))
+            with st.container(border=True):
+                st.markdown("#### 판정 요약 · {}".format(report.get("period_display", "기간 미상")))
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("초기 기준값", report.get("baseline_display", "자료 없음"))
+                c2.metric("실제 관측값", report.get("observed_display", "자료 없음"))
+                c3.metric("목표값", report.get("target_display", "자료 없음"))
+                c4.metric("목표 대비 차이", "계산 불가" if report.get("target_gap") is None else "{:+.2f} {}".format(report["target_gap"], "%p" if report.get("series_unit") == "%" else report.get("series_unit", "")))
+                c5.metric("허용 상대 미달률" if report.get("tolerance_basis") == "relative" else "허용 절대 차이",
+                          report.get("tolerance_display", "자료 없음"))
+                if report.get("relative_gap_pct") is not None:
+                    if report.get("tolerance_basis") == "relative":
+                        st.caption("판정 산식: (관측값 − 목표값) ÷ |목표값| × 100 = {:+.2f}% · 허용치 {} · 위험 조건: 상대 미달률 < −허용치".format(
+                            report["relative_gap_pct"], report.get("tolerance_display", "자료 없음")))
+                    else:
+                        absolute_gap = report.get("target_gap")
+                        st.caption("판정 산식: 관측값 − 목표값 = {} · 목표 대비 상대 미달률은 {} · 허용치 {} · 위험 조건: 절대 차이 < −허용치".format(
+                            "계산 불가" if absolute_gap is None else "{:+.2f}%p".format(absolute_gap),
+                            "계산 불가" if report.get("relative_gap_pct") is None else "{:+.2f}%".format(report["relative_gap_pct"]),
+                            report.get("tolerance_display", "자료 없음")))
+                if report.get("tolerance_exceeded"):
+                    st.error("허용 미달 한도를 넘었습니다 · {}".format(verdict))
+                elif verdict == "수치 검증 불가":
+                    st.warning("판정 보류 · 원자료에서 해당 수치를 계산하지 못했습니다.")
+                else:
+                    st.warning("허용 범위 안 · {}".format(verdict) if verdict == "주의 관찰" else "{}".format(verdict))
+                st.caption(report.get("summary", ""))
             st.markdown("**핵심 반론**")
             for point in report.get("red_team", []):
                 st.markdown(f"- {point}")
@@ -303,13 +429,27 @@ with tab_reports:
                 else:
                     st.markdown(f"- {evidence['label']} · {evidence['detail']}")
             series = report.get("series", [])
-            if len(series) > 1:
+            if len(series) > 1 and report.get("series_unit"):
                 frame = pd.DataFrame(series)
-                st.plotly_chart(px.line(frame, x="date", y="value", title="수집 시계열 (원자료)", markers=True), width="stretch")
+                st.plotly_chart(px.line(frame, x="date", y="value", title="{} ({})".format(report.get("series_label", "관측 시계열"), report.get("series_unit", "")), markers=True), width="stretch")
+            elif len(series) > 1 and "OpenDART" in report.get("source_name", ""):
+                st.info("과거 리포트의 그래프는 매출 금액과 성장률 단위가 섞였을 수 있어 숨겼습니다. 재검증 후 일관된 성장률 그래프를 표시합니다.")
+            elif len(series) > 1:
+                frame = pd.DataFrame(series)
+                st.plotly_chart(px.line(frame, x="date", y="value", title="기존 원자료 시계열 (단위 정보 없음)", markers=True), width="stretch")
             analysis = report.get("analysis") or {}
-            st.caption("분석 실행: {} · 샌드박스 결과 검산: {} · 자가수정 횟수: {}".format(
-                analysis.get("execution_mode", "사용 안 함"),
-                "통과" if report.get("sandbox_verified") else "로컬 기준식 사용",
+            if analysis.get("execution_mode") == "not_run":
+                sandbox_status = "관측값 없음 · 계산 미실행"
+            elif "sandbox_verified" not in analysis:
+                sandbox_status = "검산 정보 없음 · 이전 버전 리포트"
+            elif analysis["sandbox_verified"]:
+                sandbox_status = "E2B 전체 산식 대조 통과"
+            elif analysis.get("execution_mode") == "e2b_unverified_fallback":
+                sandbox_status = "E2B 결과 불일치 · 로컬 안전 계산으로 대체"
+            else:
+                sandbox_status = "E2B 미실행 · 로컬 결정론 계산"
+            st.caption("계산 경로: {} · {} · 자동 수정: {}회".format(
+                analysis.get("execution_mode", "사용 안 함"), sandbox_status,
                 len(analysis.get("repair_attempts", []))))
             if analysis.get("fallback_reason"):
                 st.caption("샌드박스 fallback 사유: " + analysis["fallback_reason"])
