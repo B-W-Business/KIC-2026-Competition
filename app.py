@@ -134,6 +134,18 @@ with st.sidebar:
             service = background_service_status(os.getenv("MONITOR_API_URL", "http://127.0.0.1:8000"))
             if service.get("scheduler_running"):
                 st.success("백그라운드 감시 실행 중 · {}초 간격".format(service.get("interval_seconds")))
+                last_run = service.get("last_run") or {}
+                if last_run.get("status") == "completed":
+                    summary = "최근 자동 확인 {}종목 · 신규 리포트 {}건 · 오류 종목 {}개".format(
+                        last_run.get("tickers_scanned", 0), last_run.get("new_reports", 0), last_run.get("errors", 0))
+                    if last_run.get("errors", 0):
+                        st.warning(summary)
+                        for detail in last_run.get("error_details", []):
+                            st.caption("{} · {}".format(detail.get("ticker", "종목 미상"), detail.get("message", "원인 미상")))
+                    else:
+                        st.caption(summary)
+                elif last_run.get("status") == "failed":
+                    st.warning("최근 자동 감시 실행 실패 · {}".format(last_run.get("error", "원인 미상")))
             else:
                 st.warning("백그라운드 감시 서비스가 시작 중입니다.")
         except Exception:

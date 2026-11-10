@@ -377,6 +377,48 @@ class BackgroundServiceTests(unittest.TestCase):
         self.assertNotIn("reports", payload)
         self.assertNotIn("assumptions", payload)
 
+    def test_health_only_returns_error_details_to_loopback_clients(self):
+        from kic_watch import api
+
+        class FakeRequest:
+            def __init__(self, host):
+                self.client = types.SimpleNamespace(host=host)
+
+        previous = api.last_run
+        api.last_run = {"status": "completed", "errors": 1,
+                        "error_details": [{"ticker": "005930", "message": "403"}]}
+        try:
+            local = api.health(FakeRequest("127.0.0.1"))
+            remote = api.health(FakeRequest("198.51.100.20"))
+            self.assertIn("error_details", local["last_run"])
+            self.assertNotIn("error_details", remote["last_run"])
+        finally:
+            api.last_run = previous
+
+    def test_last_run_exposes_redacted_ticker_error_summary(self):
+        from kic_watch import api
+
+        summary = api._completed_run_summary({
+            "tickers_scanned": 1, "new_reports": 0, "errors": 1,
+            "results": [{"ticker": "005930", "error": "403 https://dart.example/api?crtfc_key=secret-value"}],
+        }, "started")
+        detail = summary["error_details"][0]
+        self.assertEqual(detail["ticker"], "005930")
+        self.assertNotIn("secret-value", detail["message"])
+        self.assertIn("[REDACTED]", detail["message"])
+
+    def test_portfolio_monitor_tags_each_result_with_its_ticker(self):
+        from kic_watch import monitor
+
+        assumptions = [{"id": "a1", "ticker": "005930", "title": "Revenue", "memo": "",
+                        "metric": "revenue_growth", "source": "OpenDART", "baseline": 0,
+                        "target": 20, "tolerance": 10, "query": "", "created_at": "now",
+                        "enabled": True}]
+        with patch.object(monitor, "load_state", return_value=(assumptions, [])), \
+                patch.object(monitor, "monitor_ticker", return_value={"error": "provider unavailable"}):
+            result = monitor.monitor_portfolio()
+        self.assertEqual(result["results"][0]["ticker"], "005930")
+
 
 class ProviderMappingTests(unittest.TestCase):
     def test_opendart_annual_revenue_growth_and_gross_margin(self):

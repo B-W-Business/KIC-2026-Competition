@@ -50,7 +50,8 @@ def monitor_portfolio() -> dict:
     tickers = sorted({a.ticker for a in assumptions if a.enabled})
     results = []
     for ticker in tickers:
-        results.append(monitor_ticker(ticker, assumptions))
+        result = monitor_ticker(ticker, assumptions)
+        results.append({**result, "ticker": ticker})
     return {"tickers_scanned": len(tickers), "new_reports": sum(len(r.get("reports", [])) for r in results),
             "errors": sum(bool(r.get("error")) or bool(r.get("processing_errors")) for r in results),
             "results": results}

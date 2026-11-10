@@ -12,6 +12,7 @@ def redact_url(url: str) -> str:
         parts = urlsplit(url)
         query = urlencode([(k, "[REDACTED]" if k.lower() in SENSITIVE_QUERY_KEYS else v)
                            for k, v in parse_qsl(parts.query, keep_blank_values=True)])
+        query = query.replace("%5BREDACTED%5D", "[REDACTED]")
         return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
     except Exception:
         return re.sub(r"(?i)(api[_-]?key|subscription-key|token)=([^&\s]+)", r"\1=[REDACTED]", str(url))
